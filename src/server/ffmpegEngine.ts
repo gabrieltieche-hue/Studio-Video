@@ -1,5 +1,7 @@
 import fs from 'fs';
 import path from 'path';
+import { lookup } from 'dns/promises';
+import { isIP } from 'net';
 import { execFileSync, spawn, spawnSync } from 'child_process';
 import { chromium } from 'playwright';
 import {
@@ -125,70 +127,139 @@ export function getAvailableTakes(): SourceVideo[] {
   return videos;
 }
 
-// Save uploaded video (base64 or binary buffer) to takes/
+// Save uploaded video after strict size, extension and media-container validation.
 export function saveUploadedVideo(filename: string, dataBase64OrBuffer: string | Buffer): SourceVideo {
-  if (!fs.existsSync(TAKES_DIR)) fs.mkdirSync(TAKES_DIR, { recursive: true });
-
-  const cleanName = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
-  const targetPath = path.join(TAKES_DIR, cleanName);
-
-  if (Buffer.isBuffer(dataBase64OrBuffer)) {
-    fs.writeFileSync(targetPath, dataBase64OrBuffer);
-  } else {
-    const base64Data = dataBase64OrBuffer.replace(/^data:video\/[a-z0-9]+;base64,/, '');
-    fs.writeFileSync(targetPath, Buffer.from(base64Data, 'base64'));
+  fs.mkdirSync(TAKES_DIR, { recursive: true });
+  const cleanName = path.basename(filename).replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 160);
+  if (!cleanName || !/\.(mp4|mov|webm)$/i.test(cleanName)) {
+    throw new Error('Extension invalide. Formats acceptés : MP4, MOV et WebM.');
   }
-
-  const thumbName = `${path.parse(cleanName).name}.jpg`;
-  const thumbPath = path.join(TAKES_DIR, thumbName);
-  extractThumbnail(targetPath, thumbPath, 1.0);
-
-  const info = probeVideo(targetPath);
-
-  return {
-    id: `take-${path.parse(cleanName).name}`,
-    name: cleanName,
-    duration: info.duration,
-    resolution: info.resolution,
-    sizeMb: info.sizeMb,
-    recordedAt: new Date().toISOString().split('T')[0],
-    url: `/takes/${cleanName}`,
-    thumbnailUrl: `/takes/${thumbName}`,
-    path: targetPath
-  };
+  const targetPath = path.join(TAKES_DIR, cleanName);
+  const raw = Buffer.isBuffer(dataBase64OrBuffer)
+    ? dataBase64OrBuffer
+    : Buffer.from(dataBase64OrBuffer.replace(/^data:video\/[a-z0-9.+-]+;base64,/i, ''), 'base64');
+  const maxBytes = Number(process.env.MAX_VIDEO_UPLOAD_BYTES) || 250 * 1024 * 1024;
+  if (!raw.length || raw.length > maxBytes) throw new Error(`Fichier vide ou trop volumineux (limite ${Math.round(maxBytes / 1024 / 1024)} Mo).`);
+  fs.writeFileSync(targetPath, raw, { flag: 'wx' });
+  try {
+    const info = probeVideo(targetPath);
+    const thumbName = `${path.parse(cleanName).name}.jpg`;
+    const thumbPath = path.join(TAKES_DIR, thumbName);
+    const hasThumb = extractThumbnail(targetPath, thumbPath, Math.min(1, info.duration / 3));
+    return {
+      id: `take-${path.parse(cleanName).name}`,
+      name: cleanName,
+      duration: info.duration,
+      resolution: info.resolution,
+      sizeMb: info.sizeMb,
+      recordedAt: new Date().toISOString().split('T')[0],
+      url: `/takes/${encodeURIComponent(cleanName)}`,
+      thumbnailUrl: hasThumb ? `/takes/${encodeURIComponent(thumbName)}` : '',
+      path: targetPath
+    };
+  } catch (error) {
+    fs.rmSync(targetPath, { force: true });
+    throw error;
+  }
 }
 
-// Download remote video to takes/
-export async function downloadRemoteVideo(url: string, filename?: string): Promise<SourceVideo> {
-  if (!fs.existsSync(TAKES_DIR)) fs.mkdirSync(TAKES_DIR, { recursive: true });
+function isUnsafeAddress(address: string): boolean {
+  const normalized = address.toLowerCase().replace(/^::ffff:/, '');
+  const version = isIP(normalized);
+  if (version === 4) {
+    const parts = normalized.split('.').map(Number);
+    const [a, b] = parts;
+    return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) ||
+      (a === 100 && b >= 64 && b <= 127) || a >= 224;
+  }
+  if (version === 6) {
+    return normalized === '::' || normalized === '::1' ||
+      normalized.startsWith('fc') || normalized.startsWith('fd') ||
+      normalized.startsWith('fe8') || normalized.startsWith('fe9') ||
+      normalized.startsWith('fea') || normalized.startsWith('feb') ||
+      normalized.startsWith('ff');
+  }
+  return true;
+}
 
+async function assertPublicHttpUrl(input: string): Promise<URL> {
+  let url: URL;
+  try { url = new URL(input); } catch { throw new Error('URL source invalide.'); }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+    throw new Error('Seules les URL HTTP(S) publiques sans identifiants sont acceptées.');
+  }
+  if (url.port && !['80', '443'].includes(url.port)) throw new Error('Port distant non autorisé.');
+  if (!url.hostname || url.hostname === 'localhost' || url.hostname.endsWith('.local')) {
+    throw new Error('Hôte local interdit.');
+  }
+  const literalVersion = isIP(url.hostname);
+  const addresses = literalVersion
+    ? [{ address: url.hostname }]
+    : await lookup(url.hostname, { all: true, verbatim: true });
+  if (!addresses.length || addresses.some(item => isUnsafeAddress(item.address))) {
+    throw new Error('La source distante pointe vers une adresse privée, locale ou réservée.');
+  }
+  return url;
+}
+
+// Download an authorized public source with redirect, SSRF and size controls.
+export async function downloadRemoteVideo(inputUrl: string, filename?: string): Promise<SourceVideo> {
+  fs.mkdirSync(TAKES_DIR, { recursive: true });
   const finalName = filename || `download-${Date.now()}.mp4`;
-  const cleanName = finalName.replace(/[^a-zA-Z0-9._-]/g, '_');
+  let cleanName = path.basename(finalName).replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 160);
+  if (!/\.(mp4|mov|webm)$/i.test(cleanName)) cleanName += '.mp4';
   const targetPath = path.join(TAKES_DIR, cleanName);
+  const maxBytes = Number(process.env.MAX_VIDEO_UPLOAD_BYTES) || 250 * 1024 * 1024;
 
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Échec du téléchargement: ${res.statusText}`);
+  let current = inputUrl;
+  let response: Response | undefined;
+  for (let redirect = 0; redirect <= 4; redirect++) {
+    const safeUrl = await assertPublicHttpUrl(current);
+    response = await fetch(safeUrl, { redirect: 'manual', signal: AbortSignal.timeout(120_000) });
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      const location = response.headers.get('location');
+      if (!location) throw new Error('Redirection distante sans destination.');
+      current = new URL(location, safeUrl).toString();
+      continue;
+    }
+    break;
+  }
+  if (!response || !response.ok) throw new Error(`Échec du téléchargement distant: HTTP ${response?.status ?? 'inconnu'}.`);
+  const contentLength = Number(response.headers.get('content-length') || 0);
+  if (contentLength > maxBytes) throw new Error('La vidéo distante dépasse la limite de taille autorisée.');
+  if (!response.body) throw new Error('Le serveur distant n’a fourni aucun contenu vidéo.');
 
-  const arrayBuffer = await res.arrayBuffer();
-  fs.writeFileSync(targetPath, Buffer.from(arrayBuffer));
-
-  const thumbName = `${path.parse(cleanName).name}.jpg`;
-  const thumbPath = path.join(TAKES_DIR, thumbName);
-  extractThumbnail(targetPath, thumbPath, 1.0);
-
-  const info = probeVideo(targetPath);
-
-  return {
-    id: `take-${path.parse(cleanName).name}`,
-    name: cleanName,
-    duration: info.duration,
-    resolution: info.resolution,
-    sizeMb: info.sizeMb,
-    recordedAt: new Date().toISOString().split('T')[0],
-    url: `/takes/${cleanName}`,
-    thumbnailUrl: `/takes/${thumbName}`,
-    path: targetPath
-  };
+  const output = fs.createWriteStream(targetPath, { flags: 'wx' });
+  let bytes = 0;
+  try {
+    for await (const chunk of response.body as any) {
+      const buffer = Buffer.from(chunk);
+      bytes += buffer.length;
+      if (bytes > maxBytes) throw new Error('Téléchargement interrompu : limite de taille dépassée.');
+      if (!output.write(buffer)) await new Promise<void>(resolve => output.once('drain', resolve));
+    }
+    await new Promise<void>((resolve, reject) => output.end((error?: Error | null) => error ? reject(error) : resolve()));
+    const info = probeVideo(targetPath);
+    const thumbName = `${path.parse(cleanName).name}.jpg`;
+    const thumbPath = path.join(TAKES_DIR, thumbName);
+    const hasThumb = extractThumbnail(targetPath, thumbPath, Math.min(1, info.duration / 3));
+    return {
+      id: `take-${path.parse(cleanName).name}`,
+      name: cleanName,
+      duration: info.duration,
+      resolution: info.resolution,
+      sizeMb: info.sizeMb,
+      recordedAt: new Date().toISOString().split('T')[0],
+      url: `/takes/${encodeURIComponent(cleanName)}`,
+      thumbnailUrl: hasThumb ? `/takes/${encodeURIComponent(thumbName)}` : '',
+      path: targetPath
+    };
+  } catch (error) {
+    output.destroy();
+    fs.rmSync(targetPath, { force: true });
+    throw error;
+  }
 }
 
 // Job Storage
