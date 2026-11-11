@@ -30,6 +30,7 @@ import {
   downloadRemoteVideo,
   startRenderShort,
   detectAndRemoveSilences,
+  prepareShortMedia,
   extractAudioAndTranscribe,
   captureMotionComponentAsset,
   getJob,
@@ -472,116 +473,104 @@ async function executeToolCall(toolName: string, args: any) {
 
     case 'upload_source_video': {
       const filename = args.filename || `rush-${Date.now()}.mp4`;
-      let vid: SourceVideo;
       if (args.video_data_base64 || args.base64) {
-        vid = saveUploadedVideo(filename, args.video_data_base64 || args.base64);
-      } else if (args.video_url) {
-        vid = await downloadRemoteVideo(args.video_url, filename);
-      } else {
-        const takes = getAvailableTakes();
-        vid = takes[0] || {
-          id: `take-${Date.now()}`,
-          name: filename,
-          duration: 30,
-          resolution: '1080x1920',
-          sizeMb: 5.0,
-          recordedAt: new Date().toISOString().split('T')[0],
-          url: `/takes/${filename}`
-        };
+        const video = saveUploadedVideo(filename, args.video_data_base64 || args.base64);
+        return { success: true, video, message: `Vidéo réellement enregistrée et validée par FFprobe : ${video.name}.` };
       }
-      return {
-        success: true,
-        video: vid,
-        message: `Fichier vidéo "${vid.name}" enregistré avec persistance sur disque dans storage/takes/ et vérifié par FFprobe (${vid.sizeMb} Mo, ${vid.duration}s, ${vid.resolution}).`
-      };
+      if (args.video_url) {
+        const video = await downloadRemoteVideo(args.video_url, filename);
+        return { success: true, video, message: `Vidéo réellement téléchargée et validée par FFprobe : ${video.name}.` };
+      }
+      throw new Error('Import non effectué : fournissez video_data_base64 ou video_url. Aucun fichier fictif ne sera créé.');
     }
 
     case 'create_short_project': {
-      const dur = Number(args.duration) || 45.0;
-      const scriptText = args.script || args.title || 'Voici un nouveau short monté automatiquement par l\'agent IA avec sous-titres dynamiques et synchronisation Whisper mot par mot.';
-      const words = scriptText.trim().split(/\s+/).filter(Boolean);
-      const totalWords = words.length;
-
-      const generatedTranscript: WhisperWord[] = words.map((w: string, idx: number) => {
-        const start = Number(((idx / totalWords) * dur * 0.95).toFixed(2));
-        const end = Number((((idx + 0.9) / totalWords) * dur * 0.95).toFixed(2));
-        return {
-          id: `w-${idx + 1}`,
-          word: w,
-          start,
-          end,
-          confidence: 0.98
-        };
-      });
-
+      const mode = args.mode || 'split_screen_clips';
+      if (!['faceless_explainer', 'split_screen_clips'].includes(mode)) throw new Error('Mode de production invalide.');
+      const slug = String(args.slug || `short-${Date.now()}`);
+      if (!/^[a-z0-9][a-z0-9-]{1,48}$/.test(slug)) throw new Error('Slug invalide (minuscules, chiffres et tirets, 2 à 49 caractères).');
+      if (getProject(slug)) throw new Error(`Un projet avec le slug "${slug}" existe déjà.`);
       const takes = getAvailableTakes();
-      const defaultSource = takes[0]?.name || 'take-melvyn-01.mp4';
+      const source = args.source_video ? takes.find(video => video.name === args.source_video) : undefined;
+      if (args.source_video && !source) throw new Error(`Vidéo source introuvable dans takes/: ${args.source_video}`);
+      if (mode === 'split_screen_clips' && !source) {
+        throw new Error('Le mode split-screen nécessite un rush réel présent dans takes/. Importez le fichier avant de créer le projet.');
+      }
 
+      const duration = Number(args.duration) || source?.duration || 45;
+      if (!Number.isFinite(duration) || duration < 1 || duration > 180) throw new Error('Durée de projet invalide (1 à 180 secondes).');
+      const fps = Number(args.fps) || 30;
+      const now = new Date().toISOString();
       const newProj: ShortProject = {
-        id: `proj-${Date.now()}`,
-        slug: args.slug || `short-${Date.now()}`,
-        title: args.title || 'Nouveau Short IA',
-        mode: args.mode || 'split_screen_clips',
+        id: `proj-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+        slug,
+        title: String(args.title || 'Nouveau Short').slice(0, 160),
+        mode,
         platform: args.platform || 'instagram',
-        status: 'ready',
-        duration: dur,
-        fps: args.fps || 30,
+        status: 'draft',
+        duration,
+        fps,
         resolution: { width: 1080, height: 1920 },
-        sourceVideoName: args.source_video || args.filename || defaultSource,
-        speakerVideoUrl: args.speaker_video_url || args.source_video_url || `/takes/${defaultSource}`,
+        ...(source ? { sourceVideoName: source.name, speakerVideoUrl: source.url } : {}),
         currentVersion: 'v1',
-        versions: [
-          {
-            version: 'v1',
-            createdAt: new Date().toISOString().replace('T', ' ').slice(0, 16),
-            status: 'current',
-            duration: dur,
-            fps: args.fps || 30,
-            notes: 'Projet créé via ChatGPT / Interface'
-          }
-        ],
-        transcript: generatedTranscript,
-        motionTrack: [
-          { id: 'm1', componentId: 'comp-chart', name: 'Intro Données', start: 0, end: Math.min(10, dur / 3), type: 'chart' },
-          { id: 'm2', componentId: 'comp-rocket', name: 'Animation Clé', start: Math.min(10.1, dur / 3), end: Math.min(25, (dur * 2) / 3), type: 'rocket' },
-          { id: 'm3', componentId: 'comp-neural', name: 'Réseau Final', start: Math.min(25.1, (dur * 2) / 3), end: dur, type: 'network' }
-        ],
-        layoutTrack: [
-          { id: 'l1', layout: args.mode === 'split_screen_clips' ? 'split' : 'fullscreen', start: 0, end: dur }
-        ],
-        sfxTrack: [
-          { id: 's1', sound: 'whoosh', start: 0.2, volume: 0.8 },
-          { id: 's2', sound: 'pop', start: Math.min(5, dur / 4), volume: 0.7 },
-          { id: 's3', sound: 'click', start: Math.min(15, dur / 2), volume: 0.7 }
-        ],
-        musicTrack: { trackName: 'ambient-tech.mp3', volume: 0.15, ducking: true },
+        versions: [{
+          version: 'v1',
+          createdAt: now,
+          status: 'draft',
+          duration,
+          fps,
+          notes: 'Projet initialisé. Aucun rendu ni transcription n’a encore été produit.'
+        }],
+        transcript: [],
+        motionTrack: [],
+        layoutTrack: [{ id: 'layout-main', layout: mode === 'split_screen_clips' ? 'split' : 'fullscreen', start: 0, end: duration }],
+        sfxTrack: [],
+        musicTrack: { trackName: '', volume: 0.15, ducking: true },
         feedbacks: [],
-        motionComponents: { ...initialMotionComponents },
-        contactSheet: Array.from({ length: 12 }, (_, i) => ({
-          frameIndex: i + 1,
-          timestamp: Number(((i / 11) * dur).toFixed(2)),
-          timeFormatted: `00:${((i / 11) * dur).toFixed(1)}s`,
-          title: `Frame #${i + 1}`,
-          qcCheck: 'pass',
-          notes: 'Plan vérifié'
-        })),
+        motionComponents: {},
+        contactSheet: [],
         styleProfile: {
-          name: 'Default Clean VF',
+          name: 'Default Editorial',
           fontFamily: 'Inter, sans-serif',
           accentColor: '#FF6B00',
-          textColor: '#FFFFFF',
-          cardBg: '#18181B',
+          textColor: '#171717',
+          cardBg: '#FFFFFF',
           captionsPosition: 'center_divider',
           visualBeatsTarget: 20
         }
       };
-
       saveProject(newProj);
       return {
         success: true,
         projectId: newProj.id,
         project: newProj,
-        message: `Projet "${newProj.title}" créé et persisté sur disque dans storage/projects/${newProj.id}/project.json.`
+        message: `Projet "${newProj.title}" créé en brouillon. La transcription et les rendus restent à produire.`
+      };
+    }
+
+    case 'transcribe_short': {
+      const proj = getProject(args.project_id);
+      if (!proj) throw new Error(`Projet "${args.project_id}" introuvable.`);
+      const sourceName = proj.preparedVideoName || proj.sourceVideoName;
+      if (!sourceName) throw new Error('Aucune vidéo source n’est associée au projet.');
+      const source = getAvailableTakes().find(video => video.name === sourceName);
+      if (!source?.path) throw new Error(`Fichier source absent du stockage: ${sourceName}`);
+      const words = await extractAudioAndTranscribe(proj, source.path, args.language || 'fr');
+      if (!words.length) throw new Error('Whisper n’a retourné aucun mot horodaté.');
+      proj.transcript = words;
+      saveProject(proj);
+      const jobId = `transcribe-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+      const now = new Date().toISOString();
+      saveJob({
+        id: jobId, projectId: proj.id, slug: proj.slug, version: proj.currentVersion,
+        status: 'completed', progress: 100, outputMp4: '', thumbnailUrl: '', contactSheetUrl: '',
+        duration: proj.duration, startedAt: now, completedAt: now,
+        log: `Whisper exécuté sur ${sourceName}: ${words.length} mots horodatés.`
+      });
+      return {
+        jobId, status: 'completed', wordsCount: words.length,
+        language: args.language || 'fr', timingSource: 'whisper.cpp -ml 1',
+        message: `Transcription réellement exécutée par whisper.cpp : ${words.length} mots horodatés.`
       };
     }
 
@@ -614,79 +603,120 @@ async function executeToolCall(toolName: string, args: any) {
     case 'prepare_short': {
       const proj = getProject(args.project_id);
       if (!proj) throw new Error(`Projet "${args.project_id}" introuvable.`);
-      proj.status = 'ready';
+      if (!proj.sourceVideoName) throw new Error('Aucune vidéo source à préparer pour ce projet.');
+      const original = getAvailableTakes().find(video => video.name === proj.sourceVideoName);
+      if (!original?.path) throw new Error(`Vidéo source introuvable: ${proj.sourceVideoName}`);
+      proj.status = 'preparing';
+      const result = prepareShortMedia(proj, original.path);
+      if (result.changed && result.outputName) proj.preparedVideoName = result.outputName;
+      proj.duration = result.adjustedDuration;
+      proj.status = 'draft';
       saveProject(proj);
       return {
         success: true,
         projectId: proj.id,
-        silencesRemovedSeconds: 2.8,
-        adjustedDuration: proj.duration,
-        message: 'Coupes de silences appliquées, voix normalisée et timeline prête sur disque.'
+        sourceVideoName: original.name,
+        preparedVideoName: result.outputName,
+        changed: result.changed,
+        silencesDetected: result.silences.length,
+        silencesRemovedSeconds: result.totalSilencesRemoved,
+        originalDuration: result.originalDuration,
+        adjustedDuration: result.adjustedDuration,
+        speechSegments: result.speechSegments.length,
+        message: result.changed
+          ? `Montage préparatoire FFmpeg réellement créé: ${result.outputName}; ${result.totalSilencesRemoved.toFixed(2)} s de silence supprimées.`
+          : 'Analyse FFmpeg terminée : aucune coupe suffisamment longue à appliquer. Le rush original est conservé.'
       };
     }
 
     case 'save_edit_spec': {
       const proj = getProject(args.project_id);
       if (!proj) throw new Error(`Projet "${args.project_id}" introuvable.`);
-      if (args.edit_spec?.motionTrack) proj.motionTrack = args.edit_spec.motionTrack;
-      if (args.edit_spec?.layoutTrack) proj.layoutTrack = args.edit_spec.layoutTrack;
-      if (args.edit_spec?.sfxTrack) proj.sfxTrack = args.edit_spec.sfxTrack;
+      if (!args.edit_spec || typeof args.edit_spec !== 'object' || Array.isArray(args.edit_spec)) {
+        throw new Error('edit_spec doit être un objet JSON.');
+      }
+      proj.editSpec = args.edit_spec;
+      if (Array.isArray(args.edit_spec.motionTrack)) proj.motionTrack = args.edit_spec.motionTrack;
+      if (Array.isArray(args.edit_spec.layoutTrack)) proj.layoutTrack = args.edit_spec.layoutTrack;
+      if (Array.isArray(args.edit_spec.sfxTrack)) proj.sfxTrack = args.edit_spec.sfxTrack;
       saveProject(proj);
       return {
         success: true,
         projectId: proj.id,
-        message: `Scénario technique de montage sauvegardé sur disque dans storage/projects/${proj.id}/spec.json.`
+        specPath: `storage/projects/${proj.id}/spec.json`,
+        motionItems: proj.motionTrack.length,
+        layoutItems: proj.layoutTrack.length,
+        sfxItems: proj.sfxTrack.length,
+        message: 'Spécification complète du montage enregistrée en JSON.'
       };
     }
 
     case 'write_motion_component': {
-      const id = `comp-${args.component_name.toLowerCase().replace(/[^a-z0-9_-]/g, '-')}`;
+      const componentName = String(args.component_name || '');
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{1,40}$/.test(componentName)) throw new Error('Nom de composant invalide.');
+      const rawCode = String(args.code || '');
+      if (!rawCode.includes('window.setT')) throw new Error('Le composant doit exposer window.setT(t).');
+      const html = /<html[\s>]|<!doctype/i.test(rawCode)
+        ? rawCode
+        : `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}*{box-sizing:border-box}</style></head><body>${rawCode.includes('<body') ? rawCode : ''}<script>${rawCode.includes('<body') ? '' : rawCode}</script></body></html>`;
+      const id = `comp-${componentName.toLowerCase().replace(/[^a-z0-9_-]/g, '-')}`;
       const comp: MotionComponent = {
-        id,
-        name: args.component_name,
-        code: args.code,
-        description: args.description || 'Composant d\'animation personnalisé',
-        tRange: [0, 1],
-        width: 1080,
-        height: 1080,
-        fps: 30,
+        id, name: componentName, code: html,
+        description: args.description || 'Composant d’animation personnalisé',
+        tRange: [0, 1], width: 1080, height: 1920, fps: 30,
         hasAlpha: args.has_alpha ?? true
       };
-
-      if (!fs.existsSync(COMPONENTS_DIR)) fs.mkdirSync(COMPONENTS_DIR, { recursive: true });
-      fs.writeFileSync(path.join(COMPONENTS_DIR, `${args.component_name}.html`), args.code, 'utf-8');
-
+      fs.mkdirSync(COMPONENTS_DIR, { recursive: true });
+      fs.writeFileSync(path.join(COMPONENTS_DIR, `${componentName}.html`), html, 'utf-8');
       const all = getAllProjects();
-      all.forEach(p => {
-        p.motionComponents[id] = comp;
-        saveProject(p);
+      all.forEach(project => {
+        project.motionComponents[id] = comp;
+        saveProject(project);
       });
-
       return {
-        success: true,
-        componentId: id,
-        name: comp.name,
-        message: `Composant d'animation "${comp.name}" enregistré sur disque dans storage/components/${args.component_name}.html avec fonction window.setT(t).`
+        success: true, componentId: id, name: comp.name,
+        htmlPath: `storage/components/${componentName}.html`,
+        message: `Composant HTML enregistré. La capture réelle doit encore être exécutée avec capture_motion_component.`
       };
     }
 
     case 'capture_motion_component': {
+      const name = String(args.component_name || '');
+      const duration = Number(args.duration) || 5;
+      const fps = Number(args.fps) || 30;
+      const resolution = args.resolution === '540x960' ? '540x960' : '1080x1920';
+      const alpha = args.has_alpha !== false;
+      const asset = await captureMotionComponentAsset(name, duration, fps, resolution, alpha);
+      if (!fs.existsSync(asset.mp4Path) || asset.sizeBytes < 1024) {
+        throw new Error('La capture a échoué : aucun clip vidéo valide n’a été produit.');
+      }
       return {
         success: true,
-        component: args.component_name,
-        framesCount: Math.round((args.duration || 5) * (args.fps || 30)),
-        videoAssetUrl: `/renders/component_${args.component_name}.mp4`,
-        message: `Séquence de ${args.duration || 5}s capturée à ${args.fps || 30}fps avec canal alpha.`
+        component: name,
+        framesCount: asset.framesCount,
+        videoAssetUrl: asset.mp4Url,
+        previewUrl: asset.pngUrl,
+        sizeBytes: asset.sizeBytes,
+        message: `Capture Chromium réelle: ${asset.framesCount} images rendues via window.setT(t), puis encodées par FFmpeg.`
       };
     }
 
     case 'render_short': {
       const proj = getProject(args.project_id);
       if (!proj) throw new Error(`Projet "${args.project_id}" introuvable.`);
+      const activeDraft = (proj.versions || []).find(version => version.version === proj.currentVersion && version.status === 'draft');
       const nextNum = (proj.versions || []).length + 1;
-      const nextV = args.version || `v${nextNum}`;
+      const nextV = args.version || activeDraft?.version || `v${nextNum}`;
 
-      // Start REAL FFmpeg render process
+      // Capture each actual timeline component before FFmpeg starts.
+      for (const item of proj.motionTrack || []) {
+        const component = proj.motionComponents?.[item.componentId];
+        if (!component) throw new Error(`Composant manquant pour la piste de mouvement: ${item.componentId}`);
+        const duration = Math.max(0.5, Math.min(20, Number(item.end) - Number(item.start)));
+        await captureMotionComponentAsset(component.name, duration, Math.min(30, component.fps || 30), '1080x1920', Boolean(component.hasAlpha));
+      }
+
+      // Start FFmpeg only after source/spec/motion inputs have been checked.
       const job = startRenderShort(proj, nextV, { quality: args.quality, fps: args.fps });
 
       return {
@@ -706,14 +736,7 @@ async function executeToolCall(toolName: string, args: any) {
 
     case 'job_status': {
       const job = getJob(args.job_id);
-      if (!job) {
-        return {
-          id: args.job_id,
-          status: 'completed',
-          progress: 100,
-          message: 'Tâche terminée'
-        };
-      }
+      if (!job) throw new Error(`Tâche inconnue: ${args.job_id}`);
       return job;
     }
 
@@ -745,23 +768,21 @@ async function executeToolCall(toolName: string, args: any) {
     }
 
     case 'make_reference_contact_sheet': {
-      const proj = getProject(args.project_id);
-      if (!proj) throw new Error(`Projet "${args.project_id}" introuvable.`);
-      const ver = proj.currentVersion;
-      const mp4Path = path.join(RENDERS_DIR, `${proj.slug}_${ver}.mp4`);
-      const contactPath = path.join(RENDERS_DIR, `${proj.slug}_${ver}_contact.jpg`);
-
-      if (fs.existsSync(mp4Path)) {
-        generateContactSheet(mp4Path, contactPath, proj.duration);
+      const sourceName = String(args.source_filename || '');
+      const source = getAvailableTakes().find(video => video.name === sourceName);
+      if (!source?.path) throw new Error(`Vidéo de référence introuvable dans takes/: ${sourceName}`);
+      const outputPath = path.join(RENDERS_DIR, `reference-${path.parse(sourceName).name}-${Date.now()}.jpg`);
+      const ok = generateContactSheet(source.path, outputPath, source.duration);
+      if (!ok || !fs.existsSync(outputPath) || fs.statSync(outputPath).size < 1024) {
+        throw new Error('FFmpeg n’a pas produit de planche de contact exploitable.');
       }
-
       return {
         success: true,
-        projectId: proj.id,
-        version: ver,
-        contactSheetUrl: `/renders/${proj.slug}_${ver}_contact.jpg`,
-        qcPassed: true,
-        message: 'Planche de contact 12 images extraite avec FFmpeg et vérifiée conforme.'
+        sourceVideo: source.name,
+        contactSheetUrl: `/renders/${path.basename(outputPath)}`,
+        outputBytes: fs.statSync(outputPath).size,
+        qcPassed: false,
+        message: 'Planche de contact réelle générée. Le contrôle visuel doit encore être réalisé par le modèle.'
       };
     }
 
