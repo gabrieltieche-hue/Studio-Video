@@ -56,7 +56,30 @@ const defaultFeedbacks: FeedbackItem[] = [
   }
 ];
 
-export default function App() {
+export default // In production, the API key is entered once per browser tab. The server exchanges
+// the bearer header for an HttpOnly same-origin cookie used by the native video player.
+async function studioFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  const send = (token: string | null) => {
+    const headers = new Headers(init.headers || {});
+    if (token) headers.set('Authorization', `Bearer ${token}`);
+    return fetch(input, { ...init, headers, credentials: 'same-origin' });
+  };
+  let token = sessionStorage.getItem('studio_api_key');
+  let response = await send(token);
+  if (response.status === 401) {
+    const entered = window.prompt('Clé d’accès Video Agent Studio (elle reste dans cet onglet uniquement) :');
+    if (entered && entered.trim().length >= 32) {
+      token = entered.trim();
+      sessionStorage.setItem('studio_api_key', token);
+      response = await send(token);
+    } else {
+      sessionStorage.removeItem('studio_api_key');
+    }
+  }
+  return response;
+}
+
+function App() {
   const [activeView, setActiveView] = useState<'studio' | 'recorder'>('studio');
   const [projects, setProjects] = useState<ShortProject[]>([]);
   const [selectedProject, setSelectedProject] = useState<ShortProject | null>(null);
@@ -107,7 +130,7 @@ export default function App() {
     videoFileName?: string;
   }) => {
     try {
-      const res = await fetch('/api/studio/projects', {
+      const res = await studioFetch('/api/studio/projects', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data)
@@ -135,7 +158,7 @@ export default function App() {
   // Delete Project Handler
   const handleDeleteProject = async (id: string) => {
     try {
-      await fetch(`/api/studio/projects/${id}`, { method: 'DELETE' });
+      await studioFetch(`/api/studio/projects/${id}`, { method: 'DELETE' });
       setProjects(prev => {
         const updated = prev.filter(p => p.id !== id);
         if (selectedProject?.id === id && updated.length > 0) {
@@ -161,7 +184,7 @@ export default function App() {
         throw new Error('Format non pris en charge. Utilisez MP4, MOV ou WebM.');
       }
 
-      const response = await fetch('/api/studio/videos/upload', {
+      const response = await studioFetch('/api/studio/videos/upload', {
         method: 'POST',
         headers: {
           'Content-Type': file.type || 'application/octet-stream',
@@ -184,7 +207,7 @@ export default function App() {
       setSourceVideos(prev => [newVid, ...prev.filter(v => v.name !== uploaded.name)]);
 
       if (selectedProject) {
-        const update = await fetch(`/api/studio/projects/${selectedProject.id}`, {
+        const update = await studioFetch(`/api/studio/projects/${selectedProject.id}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -211,7 +234,7 @@ export default function App() {
   // Fetch initial project data from server
   const loadProjects = async () => {
     try {
-      const res = await fetch('/api/studio/projects');
+      const res = await studioFetch('/api/studio/projects');
       if (res.ok) {
         const data = await res.json();
         if (data.projects && data.projects.length > 0) {
@@ -221,7 +244,7 @@ export default function App() {
         }
       }
 
-      const vidRes = await fetch('/api/studio/videos');
+      const vidRes = await studioFetch('/api/studio/videos');
       if (vidRes.ok) {
         const vidData = await vidRes.json();
         if (vidData.videos) {
