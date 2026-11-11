@@ -14,9 +14,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
+      - name: Install system media dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
       - name: Install dependencies
         run: npm install --no-audit --no-fund
+      - name: Install Chromium for motion-capture tests
+        run: npx playwright install --with-deps chromium
+      - name: Run media integration tests
+        run: npm test
       - name: TypeScript check
         run: npm run lint
       - name: Vite production build
