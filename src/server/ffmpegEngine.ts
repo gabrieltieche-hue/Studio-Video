@@ -614,13 +614,20 @@ export function startRenderShort(
   version: string,
   options: { quality?: string; fps?: number } = {}
 ): RenderJob {
-  if (!fs.existsSync(RENDERS_DIR)) fs.mkdirSync(RENDERS_DIR, { recursive: true });
+  if (!/^[a-z0-9][a-z0-9-]{0,20}$/.test(version)) throw new Error('Identifiant de version invalide.');
+  if (!/^[a-z0-9][a-z0-9-]{1,48}$/.test(project.slug)) throw new Error('Slug de projet invalide.');
+  fs.mkdirSync(RENDERS_DIR, { recursive: true });
 
-  const jobId = `job-render-${Date.now()}`;
+  const quality = options.quality === 'final' ? 'final' : 'draft';
+  const renderFps = Math.max(20, Math.min(30, Math.round(options.fps || project.fps || 30)));
+  const renderWidth = quality === 'final' ? 1080 : 540;
+  const renderHeight = quality === 'final' ? 1920 : 960;
+  const jobId = `job-render-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
   const outFileName = `${project.slug}_${version}.mp4`;
   const outputMp4 = path.join(RENDERS_DIR, outFileName);
   const outThumb = path.join(RENDERS_DIR, `${project.slug}_${version}_thumb.jpg`);
   const outContact = path.join(RENDERS_DIR, `${project.slug}_${version}_contact.jpg`);
+  const duration = Math.max(1, Math.min(Number(project.duration) || 30, 180));
 
   const job: RenderJob = {
     id: jobId,
@@ -628,224 +635,204 @@ export function startRenderShort(
     slug: project.slug,
     version,
     status: 'processing',
-    progress: 5,
+    progress: 1,
     outputMp4: `/renders/${outFileName}`,
     thumbnailUrl: `/renders/${project.slug}_${version}_thumb.jpg`,
     contactSheetUrl: `/renders/${project.slug}_${version}_contact.jpg`,
-    duration: project.duration,
+    duration,
     startedAt: new Date().toISOString()
   };
-
   saveJob(job);
 
-  // Check for source take video
-  const takes = getAvailableTakes();
-  let sourceTakePath: string | null = null;
+  const takeName = project.preparedVideoName || project.sourceVideoName;
+  let sourcePath: string | null = null;
+  if (takeName) {
+    const source = getAvailableTakes().find(video => video.name === takeName);
+    if (!source?.path || !fs.existsSync(source.path)) throw new Error(`Rush source introuvable: ${takeName}`);
+    sourcePath = source.path;
+  }
+  if (project.mode === 'split_screen_clips' && !sourcePath) {
+    throw new Error('Le mode split-screen nécessite un fichier source vidéo réel.');
+  }
 
-  if (project.sourceVideoName) {
-    const found = takes.find(t => t.name === project.sourceVideoName);
-    if (found?.path && fs.existsSync(found.path)) {
-      sourceTakePath = found.path;
+  const overlays = (project.motionTrack || []).map(item => {
+    const component = project.motionComponents?.[item.componentId];
+    if (!component) throw new Error(`Composant non enregistré: ${item.componentId}`);
+    const safeName = component.name.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const candidates = [
+      path.join(COMPONENTS_DIR, `${safeName}.mov`),
+      path.join(COMPONENTS_DIR, `${safeName}.mp4`)
+    ];
+    const assetPath = candidates.find(candidate => fs.existsSync(candidate));
+    const start = Number(item.start);
+    const end = Number(item.end);
+    if (!assetPath) throw new Error(`Clip animé non capturé: ${component.name}`);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start || start >= duration) {
+      throw new Error(`Plage temporelle invalide pour ${component.name}.`);
     }
-  }
+    return { path: assetPath, start, end: Math.min(end, duration) };
+  });
 
-  if (!sourceTakePath && takes.length > 0) {
-    sourceTakePath = takes[0].path || null;
-  }
-
-  const renderFps = options.fps || project.fps || 30;
-  const dur = Math.min(project.duration || 30, 90);
-  const startTime = Date.now();
-
-  // Check for subtitles .ass file
   const projectDir = path.join(PROJECTS_DIR, project.id);
   const assPath = path.join(projectDir, 'subtitles.ass');
-  const hasSubtitles = fs.existsSync(assPath);
+  const hasSubtitles = fs.existsSync(assPath) && fs.statSync(assPath).size > 0;
+  const escapeFilterPath = (value: string) => value
+    .replace(/\\/g, '\\\\')
+    .replace(/:/g, '\\:')
+    .replace(/'/g, "\\'")
+    .replace(/,/g, '\\,');
+  const subtitleFilter = hasSubtitles ? `ass='${escapeFilterPath(assPath)}'` : 'null';
 
-  // Check for motion overlays from project.motionTrack
-  const motionOverlays: Array<{ pngPath: string; start: number; end: number }> = [];
-  if (project.motionTrack && project.motionTrack.length > 0) {
-    for (const m of project.motionTrack) {
-      const compPng = path.join(COMPONENTS_DIR, `${m.name}.png`);
-      if (!fs.existsSync(compPng)) {
-        // Generate if missing
-        try {
-          captureMotionComponentAsset(m.name, 3.0, 30);
-        } catch {
-          // ignore
-        }
-      }
-      if (fs.existsSync(compPng)) {
-        motionOverlays.push({
-          pngPath: compPng,
-          start: m.start,
-          end: m.end
-        });
-      }
-    }
-  }
+  const args: string[] = ['-y', '-hide_banner', '-loglevel', 'info'];
+  let graph: string[] = [];
+  let baseLabel = 'base0';
+  let nextInputIndex = 0;
+  let audioInputIndex: number | null = null;
+  let backgroundInputIndex: number | null = null;
 
-  let ffmpegArgs: string[] = [];
+  const isSplit = project.mode === 'split_screen_clips' && Boolean(sourcePath) &&
+    (project.layoutTrack || []).some(item => item.layout === 'split');
 
-  if (sourceTakePath && fs.existsSync(sourceTakePath)) {
-    // Check if layout track has split screen
-    const isSplit = project.layoutTrack?.some(l => l.layout === 'split') ?? false;
-
-    if (isSplit) {
-      // Split layout: 1080x1920 with 2 stacked panels
-      const filterComplex = [
-        `[0:v]scale=1080:960:force_original_aspect_ratio=increase,crop=1080:960[top]`,
-        `[0:v]scale=1080:960:force_original_aspect_ratio=increase,crop=1080:960[bottom]`,
-        `[top][bottom]vstack=inputs=2[stacked]`,
-        hasSubtitles ? `[stacked]ass='${assPath}'[v]` : `[stacked]null[v]`
-      ].join(';');
-
-      ffmpegArgs = [
-        '-y',
-        '-ss', '0',
-        '-i', sourceTakePath,
-        '-filter_complex', filterComplex,
-        '-map', '[v]',
-        '-map', '0:a?',
-        '-t', dur.toString(),
-        '-r', renderFps.toString(),
-        '-c:v', 'libx264',
-        '-preset', 'fast',
-        '-crf', options.quality === 'final' ? '19' : '23',
-        '-pix_fmt', 'yuv420p',
-        '-c:a', 'aac',
-        '-b:a', '128k',
-        '-movflags', '+faststart',
-        outputMp4
-      ];
-    } else {
-      // Fullscreen 9:16 vertical crop with subtitles & badges
-      const filters: string[] = [
-        `scale=1080:1920:force_original_aspect_ratio=increase`,
-        `crop=1080:1920`
-      ];
-
-      if (hasSubtitles) {
-        filters.push(`ass='${assPath}'`);
-      } else {
-        filters.push(
-          `drawtext=text='${project.title.replace(/[':\\]/g, ' ')}':fontsize=44:fontcolor=white:box=1:boxcolor=0x18181bee:boxborderw=20:x=(w-text_w)/2:y=180`
-        );
-      }
-
-      ffmpegArgs = [
-        '-y',
-        '-ss', '0',
-        '-i', sourceTakePath,
-        '-t', dur.toString(),
-        '-vf', filters.join(','),
-        '-r', renderFps.toString(),
-        '-c:v', 'libx264',
-        '-preset', 'fast',
-        '-crf', options.quality === 'final' ? '19' : '23',
-        '-pix_fmt', 'yuv420p',
-        '-c:a', 'aac',
-        '-b:a', '128k',
-        '-movflags', '+faststart',
-        outputMp4
-      ];
-    }
+  if (isSplit && sourcePath) {
+    args.push('-i', sourcePath);
+    nextInputIndex = 1;
+    args.push('-f', 'lavfi', '-i', `color=c=0xF4F2ED:s=${renderWidth}x${Math.round(renderHeight / 2)}:r=${renderFps}:d=${duration}`);
+    backgroundInputIndex = 1;
+    graph.push(`[0:v:0]trim=duration=${duration},setpts=PTS-STARTPTS,scale=${renderWidth}:${Math.round(renderHeight / 2)}:force_original_aspect_ratio=decrease,pad=${renderWidth}:${Math.round(renderHeight / 2)}:(ow-iw)/2:(oh-ih)/2:color=black[bottom]`);
+    graph.push(`[${backgroundInputIndex}:v]null[top0]`);
+    baseLabel = 'top0';
+    audioInputIndex = 0;
+    nextInputIndex = 2;
+  } else if (sourcePath && project.mode !== 'faceless_explainer') {
+    args.push('-i', sourcePath);
+    graph.push(`[0:v:0]trim=duration=${duration},setpts=PTS-STARTPTS,scale=${renderWidth}:${renderHeight}:force_original_aspect_ratio=increase,crop=${renderWidth}:${renderHeight}[base0]`);
+    baseLabel = 'base0';
+    audioInputIndex = 0;
+    nextInputIndex = 1;
   } else {
-    // Motion Explainer Canvas Mode: dark aesthetic background with subtitles & badge
-    const filters: string[] = [];
-    if (hasSubtitles) {
-      filters.push(`ass='${assPath}'`);
-    } else {
-      filters.push(
-        `drawtext=text='${project.title.replace(/[':\\]/g, ' ')}':fontsize=52:fontcolor=white:box=1:boxcolor=0x18181bee:boxborderw=24:x=(w-text_w)/2:y=400`,
-        `drawtext=text='Video Agent Studio VF':fontsize=36:fontcolor=0xFF6B00:x=(w-text_w)/2:y=520`
-      );
-    }
-
-    ffmpegArgs = [
-      '-y',
-      '-f', 'lavfi',
-      '-i', `color=c=0x0f172a:s=1080x1920:d=${dur}`,
-      '-f', 'lavfi',
-      '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
-      '-vf', filters.join(','),
-      '-r', renderFps.toString(),
-      '-c:v', 'libx264',
-      '-preset', 'fast',
-      '-crf', '22',
-      '-pix_fmt', 'yuv420p',
-      '-t', dur.toString(),
-      '-c:a', 'aac',
-      '-movflags', '+faststart',
-      outputMp4
-    ];
+    args.push('-f', 'lavfi', '-i', `color=c=0xF4F2ED:s=${renderWidth}x${renderHeight}:r=${renderFps}:d=${duration}`);
+    args.push('-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100');
+    graph.push('[0:v]null[base0]');
+    baseLabel = 'base0';
+    audioInputIndex = 1;
+    nextInputIndex = 2;
   }
 
-  // Spawn FFmpeg in background
-  const proc = spawn('ffmpeg', ffmpegArgs);
+  // Motion components are actual captured clips. Loop each one and composite it only in its timeline range.
+  let currentLabel = baseLabel;
+  overlays.forEach((overlay, index) => {
+    const inputIndex = nextInputIndex++;
+    args.push('-stream_loop', '-1', '-i', overlay.path);
+    const overlayLabel = `motion${index}`;
+    const mixedLabel = `mix${index}`;
+    graph.push(`[${inputIndex}:v]scale=${renderWidth}:${isSplit ? Math.round(renderHeight / 2) : renderHeight}:force_original_aspect_ratio=decrease,pad=${renderWidth}:${isSplit ? Math.round(renderHeight / 2) : renderHeight}:(ow-iw)/2:(oh-ih)/2:color=0x00000000,format=rgba[${overlayLabel}]`);
+    graph.push(`[${currentLabel}][${overlayLabel}]overlay=0:0:format=auto:enable='between(t,${overlay.start.toFixed(3)},${overlay.end.toFixed(3)})'[${mixedLabel}]`);
+    currentLabel = mixedLabel;
+  });
+
+  if (isSplit) {
+    graph.push(`[${currentLabel}][bottom]vstack=inputs=2[stacked]`);
+    graph.push(`[stacked]${subtitleFilter}[vout]`);
+  } else {
+    graph.push(`[${currentLabel}]${subtitleFilter}[vout]`);
+  }
+
+  args.push('-filter_complex', graph.join(';'), '-map', '[vout]');
+  if (audioInputIndex !== null) args.push('-map', `${audioInputIndex}:a?`);
+  args.push(
+    '-t', duration.toFixed(3),
+    '-r', String(renderFps),
+    '-c:v', 'libx264',
+    '-preset', quality === 'final' ? 'slow' : 'veryfast',
+    '-crf', quality === 'final' ? '19' : '25',
+    '-pix_fmt', 'yuv420p',
+    '-movflags', '+faststart'
+  );
+  if (audioInputIndex !== null) args.push('-c:a', 'aac', '-b:a', quality === 'final' ? '192k' : '128k');
+  args.push(outputMp4);
+
+  const started = Date.now();
+  const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
   let stderrLog = '';
+  let settled = false;
+
+  const failJob = (message: string) => {
+    if (settled) return;
+    settled = true;
+    job.status = 'failed';
+    job.error = message.slice(0, 2000);
+    job.log = stderrLog.slice(-6000);
+    job.completedAt = new Date().toISOString();
+    const failedVersion = project.versions.find(item => item.version === version);
+    if (failedVersion) failedVersion.status = 'failed';
+    saveProject(project);
+    saveJob(job);
+  };
 
   proc.stderr.on('data', chunk => {
-    const txt = chunk.toString();
-    stderrLog += txt;
-
-    // Parse time= to update progress percentage
-    const match = txt.match(/time=(\d+):(\d+):(\d+\.\d+)/);
+    const textChunk = chunk.toString();
+    stderrLog = (stderrLog + textChunk).slice(-12000);
+    const match = textChunk.match(/time=(\d+):(\d+):(\d+\.\d+)/);
     if (match) {
-      const hours = Number(match[1]);
-      const minutes = Number(match[2]);
-      const seconds = Number(match[3]);
-      const currentSec = hours * 3600 + minutes * 60 + seconds;
-      const pct = Math.min(95, Math.round((currentSec / dur) * 100));
-      if (pct > job.progress) {
-        job.progress = pct;
+      const seconds = Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+      const nextProgress = Math.min(95, Math.max(1, Math.round((seconds / duration) * 100)));
+      if (nextProgress > job.progress) {
+        job.progress = nextProgress;
         saveJob(job);
       }
     }
   });
 
+  proc.on('error', error => failJob(`Impossible de lancer FFmpeg: ${error.message}`));
   proc.on('close', code => {
-    const elapsedSec = Number(((Date.now() - startTime) / 1000).toFixed(2));
-    const renderFpsActual = Number(((dur * renderFps) / Math.max(elapsedSec, 0.1)).toFixed(1));
+    if (settled) return;
+    const elapsed = Number(((Date.now() - started) / 1000).toFixed(2));
+    if (code !== 0 || !fs.existsSync(outputMp4) || fs.statSync(outputMp4).size < 1024) {
+      failJob(`FFmpeg a échoué (code ${code}). ${stderrLog.slice(-1500)}`);
+      return;
+    }
+    try {
+      const rendered = probeVideo(outputMp4);
+      if (rendered.width !== renderWidth || rendered.height !== renderHeight) {
+        throw new Error(`Dimensions inattendues: ${rendered.resolution}`);
+      }
+      const thumbOk = extractThumbnail(outputMp4, outThumb, Math.min(1, rendered.duration / 3));
+      const contactOk = generateContactSheet(outputMp4, outContact, rendered.duration);
+      if (!thumbOk) stderrLog += '\nAvertissement: miniature non créée.';
+      if (!contactOk) stderrLog += '\nAvertissement: planche de contact non créée; QC bloqué.';
 
-    if (code === 0 && fs.existsSync(outputMp4)) {
-      extractThumbnail(outputMp4, outThumb, 1.0);
-      generateContactSheet(outputMp4, outContact, dur);
-
+      settled = true;
       job.status = 'completed';
       job.progress = 100;
-      job.renderTimeSeconds = elapsedSec;
-      job.renderFps = renderFpsActual;
+      job.duration = rendered.duration;
+      job.renderTimeSeconds = elapsed;
+      job.renderFps = Number(((rendered.duration * renderFps) / Math.max(elapsed, 0.1)).toFixed(1));
       job.completedAt = new Date().toISOString();
-      job.log = 'Rendu terminé avec succès par FFmpeg avec intégration timeline, sous-titres et composition.';
+      job.log = `FFmpeg a produit un MP4 réel (${rendered.resolution}, ${renderFps} fps, ${rendered.duration}s). ${stderrLog.slice(-2500)}`;
 
-      // PRESERVE ALL VERSIONS: Do not overwrite older versions!
-      const existingVer = project.versions.find(v => v.version === version);
-      if (existingVer) {
-        existingVer.status = 'done';
-        existingVer.outputMp4 = job.outputMp4;
-        existingVer.duration = dur;
+      const existing = project.versions.find(item => item.version === version);
+      if (existing) {
+        existing.status = 'done';
+        existing.outputMp4 = job.outputMp4;
+        existing.duration = rendered.duration;
       } else {
         project.versions.unshift({
           version,
-          createdAt: new Date().toISOString().replace('T', ' ').slice(0, 16),
+          createdAt: new Date().toISOString(),
           status: 'done',
-          duration: dur,
+          duration: rendered.duration,
           fps: renderFps,
-          notes: `Rendu FFmpeg ${options.quality || 'draft'} produit en ${elapsedSec}s. Timeline, sous-titres et motion intégrés.`,
+          notes: `Rendu ${quality} FFmpeg. Vérifier la planche de contact avant validation QC.`,
           outputMp4: job.outputMp4
         });
       }
       project.currentVersion = version;
       project.status = 'ready';
       saveProject(project);
-    } else {
-      job.status = 'failed';
-      job.error = `FFmpeg a échoué avec le code ${code}`;
-      job.log = stderrLog.slice(-1000);
+      saveJob(job);
+    } catch (error: any) {
+      failJob(`Contrôle du MP4 final échoué: ${error.message}`);
     }
-
-    saveJob(job);
   });
 
   return job;
