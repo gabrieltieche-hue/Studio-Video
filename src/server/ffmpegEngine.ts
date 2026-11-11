@@ -423,6 +423,10 @@ export async function extractAudioAndTranscribe(
   const source = probeVideo(sourceVideoPath);
   if (!source.hasAudio) throw new Error('La vidéo ne contient pas de piste audio : transcription impossible.');
 
+  if (overlays.length === 0) {
+    throw new Error('Aucune animation capturée dans motionTrack. Ajoutez au moins un composant de motion design avant le rendu.');
+  }
+
   const projectDir = path.join(PROJECTS_DIR, project.id);
   fs.mkdirSync(projectDir, { recursive: true });
   const wavPath = path.join(projectDir, 'audio-16khz-mono.wav');
@@ -528,7 +532,7 @@ export async function captureMotionComponentAsset(
   componentName: string,
   durationSec = 3.0,
   fps = 30,
-  resolution: '540x960' | '1080x1920' = '1080x1920',
+  resolution: '540x960' | '1080x960' | '1080x1920' = '1080x1920',
   alpha = false
 ): Promise<{
   pngPath: string;
@@ -623,10 +627,11 @@ export function startRenderShort(
   const renderWidth = quality === 'final' ? 1080 : 540;
   const renderHeight = quality === 'final' ? 1920 : 960;
   const jobId = `job-render-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
-  const outFileName = `${project.slug}_${version}.mp4`;
+  const renderTag = quality === 'draft' ? `${version}_draft` : version;
+  const outFileName = `${project.slug}_${renderTag}.mp4`;
   const outputMp4 = path.join(RENDERS_DIR, outFileName);
-  const outThumb = path.join(RENDERS_DIR, `${project.slug}_${version}_thumb.jpg`);
-  const outContact = path.join(RENDERS_DIR, `${project.slug}_${version}_contact.jpg`);
+  const outThumb = path.join(RENDERS_DIR, `${project.slug}_${renderTag}_thumb.jpg`);
+  const outContact = path.join(RENDERS_DIR, `${project.slug}_${renderTag}_contact.jpg`);
   const duration = Math.max(1, Math.min(Number(project.duration) || 30, 180));
 
   const job: RenderJob = {
@@ -637,13 +642,11 @@ export function startRenderShort(
     status: 'processing',
     progress: 1,
     outputMp4: `/renders/${outFileName}`,
-    thumbnailUrl: `/renders/${project.slug}_${version}_thumb.jpg`,
-    contactSheetUrl: `/renders/${project.slug}_${version}_contact.jpg`,
+    thumbnailUrl: `/renders/${project.slug}_${renderTag}_thumb.jpg`,
+    contactSheetUrl: `/renders/${project.slug}_${renderTag}_contact.jpg`,
     duration,
     startedAt: new Date().toISOString()
   };
-  saveJob(job);
-
   const takeName = project.preparedVideoName || project.sourceVideoName;
   let sourcePath: string | null = null;
   if (takeName) {
@@ -710,12 +713,23 @@ export function startRenderShort(
     audioInputIndex = 0;
     nextInputIndex = 1;
   } else {
-    args.push('-f', 'lavfi', '-i', `color=c=0xF4F2ED:s=${renderWidth}x${renderHeight}:r=${renderFps}:d=${duration}`);
-    args.push('-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100');
-    graph.push('[0:v]null[base0]');
+    // Faceless mode renders original visuals on a clean canvas. When a source
+    // video is attached, only its audio is used as the voice-over track.
+    if (sourcePath && probeVideo(sourcePath).hasAudio) {
+      args.push('-i', sourcePath);
+      audioInputIndex = 0;
+      args.push('-f', 'lavfi', '-i', `color=c=0xF4F2ED:s=${renderWidth}x${renderHeight}:r=${renderFps}:d=${duration}`);
+      backgroundInputIndex = 1;
+      graph.push('[1:v]null[base0]');
+      nextInputIndex = 2;
+    } else {
+      args.push('-f', 'lavfi', '-i', `color=c=0xF4F2ED:s=${renderWidth}x${renderHeight}:r=${renderFps}:d=${duration}`);
+      args.push('-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100');
+      graph.push('[0:v]null[base0]');
+      audioInputIndex = 1;
+      nextInputIndex = 2;
+    }
     baseLabel = 'base0';
-    audioInputIndex = 1;
-    nextInputIndex = 2;
   }
 
   // Motion components are actual captured clips. Loop each one and composite it only in its timeline range.
@@ -808,7 +822,7 @@ export function startRenderShort(
       job.renderTimeSeconds = elapsed;
       job.renderFps = Number(((rendered.duration * renderFps) / Math.max(elapsed, 0.1)).toFixed(1));
       job.completedAt = new Date().toISOString();
-      job.log = `FFmpeg a produit un MP4 réel (${rendered.resolution}, ${renderFps} fps, ${rendered.duration}s). ${stderrLog.slice(-2500)}`;
+      job.log = `FFmpeg a produit un MP4 réel (${rendered.resolution}, ${renderFps} fps, ${rendered.duration}s). Audio présent: ${rendered.hasAudio}. ${stderrLog.slice(-2500)}`;
 
       const existing = project.versions.find(item => item.version === version);
       if (existing) {
@@ -819,7 +833,7 @@ export function startRenderShort(
         project.versions.unshift({
           version,
           createdAt: new Date().toISOString(),
-          status: 'done',
+          status: quality === 'draft' ? 'draft' : 'done',
           duration: rendered.duration,
           fps: renderFps,
           notes: `Rendu ${quality} FFmpeg. Vérifier la planche de contact avant validation QC.`,
@@ -827,7 +841,7 @@ export function startRenderShort(
         });
       }
       project.currentVersion = version;
-      project.status = 'ready';
+      project.status = quality === 'draft' ? 'draft' : 'ready';
       saveProject(project);
       saveJob(job);
     } catch (error: any) {
