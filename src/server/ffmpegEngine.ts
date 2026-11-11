@@ -10,6 +10,8 @@ import {
   PROJECTS_DIR,
   COMPONENTS_DIR,
   JOBS_DIR,
+  MUSIC_DIR,
+  SFX_DIR,
   ShortProject,
   SourceVideo,
   WhisperWord,
@@ -692,6 +694,7 @@ export function startRenderShort(
   let nextInputIndex = 0;
   let audioInputIndex: number | null = null;
   let backgroundInputIndex: number | null = null;
+  let audioOutputLabel: string | null = null;
 
   const isSplit = project.mode === 'split_screen_clips' && Boolean(sourcePath) &&
     (project.layoutTrack || []).some(item => item.layout === 'split');
@@ -704,13 +707,13 @@ export function startRenderShort(
     graph.push(`[0:v:0]trim=duration=${duration},setpts=PTS-STARTPTS,scale=${renderWidth}:${Math.round(renderHeight / 2)}:force_original_aspect_ratio=decrease,pad=${renderWidth}:${Math.round(renderHeight / 2)}:(ow-iw)/2:(oh-ih)/2:color=black[bottom]`);
     graph.push(`[${backgroundInputIndex}:v]null[top0]`);
     baseLabel = 'top0';
-    audioInputIndex = 0;
+    audioInputIndex = probeVideo(sourcePath).hasAudio ? 0 : null;
     nextInputIndex = 2;
   } else if (sourcePath && project.mode !== 'faceless_explainer') {
     args.push('-i', sourcePath);
     graph.push(`[0:v:0]trim=duration=${duration},setpts=PTS-STARTPTS,scale=${renderWidth}:${renderHeight}:force_original_aspect_ratio=increase,crop=${renderWidth}:${renderHeight}[base0]`);
     baseLabel = 'base0';
-    audioInputIndex = 0;
+    audioInputIndex = probeVideo(sourcePath).hasAudio ? 0 : null;
     nextInputIndex = 1;
   } else {
     // Faceless mode renders original visuals on a clean canvas. When a source
@@ -751,8 +754,66 @@ export function startRenderShort(
     graph.push(`[${currentLabel}]${subtitleFilter}[vout]`);
   }
 
+  // Build the final audio bus from source voice, optional music and timed SFX.
+  const audioLabels: string[] = [];
+  if (audioInputIndex !== null) {
+    graph.push(`[${audioInputIndex}:a:0]atrim=duration=${duration.toFixed(3)},asetpts=PTS-STARTPTS[voice]`);
+    audioLabels.push('voice');
+  }
+
+  const musicName = String(project.musicTrack?.trackName || '').trim();
+  if (musicName) {
+    const safeMusicName = path.basename(musicName);
+    if (safeMusicName !== musicName || !/^[a-zA-Z0-9._ -]{1,120}\.(mp3|wav|m4a|aac|ogg)$/i.test(safeMusicName)) {
+      throw new Error('Nom de fichier de musique invalide. Utilisez un fichier local dans storage/music.');
+    }
+    const musicPath = path.join(MUSIC_DIR, safeMusicName);
+    if (!fs.existsSync(musicPath)) throw new Error(`Musique sélectionnée introuvable dans storage/music/: ${safeMusicName}`);
+    const musicIndex = nextInputIndex++;
+    args.push('-stream_loop', '-1', '-i', musicPath);
+    const volume = Math.max(0, Math.min(1, Number(project.musicTrack.volume) || 0));
+    graph.push(`[${musicIndex}:a:0]atrim=duration=${duration.toFixed(3)},asetpts=PTS-STARTPTS,volume=${volume.toFixed(3)}[music]`);
+    if (audioLabels.includes('voice') && project.musicTrack.ducking) {
+      graph.push('[music][voice]sidechaincompress=threshold=0.025:ratio=7:attack=20:release=420[duckedmusic]');
+      graph.push('[voice][duckedmusic]amix=inputs=2:duration=first:dropout_transition=2,alimiter=limit=0.95[program]');
+    } else if (audioLabels.includes('voice')) {
+      graph.push('[voice][music]amix=inputs=2:duration=first:dropout_transition=2,alimiter=limit=0.95[program]');
+    } else {
+      graph.push('[music]alimiter=limit=0.95[program]');
+    }
+    audioLabels.length = 0;
+    audioLabels.push('program');
+  }
+
+  const sfxLabels: string[] = [];
+  for (let index = 0; index < (project.sfxTrack || []).length; index++) {
+    const item = project.sfxTrack[index];
+    const soundName = String(item.sound || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
+    const candidates = ['wav', 'mp3', 'm4a', 'ogg'].map(ext => path.join(SFX_DIR, `${soundName}.${ext}`));
+    const sfxPath = candidates.find(candidate => fs.existsSync(candidate));
+    if (!sfxPath) throw new Error(`Effet sonore "${soundName}" absent de storage/sfx/. Aucun SFX ne sera ignoré silencieusement.`);
+    const start = Number(item.start);
+    const volume = Math.max(0, Math.min(1, Number(item.volume) || 0));
+    if (!Number.isFinite(start) || start < 0 || start >= duration) throw new Error(`Timecode SFX invalide pour ${soundName}.`);
+    const sfxIndex = nextInputIndex++;
+    args.push('-i', sfxPath);
+    const label = `sfx${index}`;
+    const delay = Math.round(start * 1000);
+    graph.push(`[${sfxIndex}:a:0]atrim=duration=${(duration - start).toFixed(3)},asetpts=PTS-STARTPTS,volume=${volume.toFixed(3)},adelay=${delay}|${delay}[${label}]`);
+    sfxLabels.push(label);
+  }
+
+  const allAudioLabels = [...audioLabels, ...sfxLabels];
+  if (allAudioLabels.length > 1) {
+    graph.push(`${allAudioLabels.map(label => `[${label}]`).join('')}amix=inputs=${allAudioLabels.length}:duration=first:dropout_transition=2,alimiter=limit=0.95[aout]`);
+    audioOutputLabel = 'aout';
+  } else if (allAudioLabels.length === 1) {
+    audioOutputLabel = allAudioLabels[0];
+  }
+
   args.push('-filter_complex', graph.join(';'), '-map', '[vout]');
-  if (audioInputIndex !== null) args.push('-map', `${audioInputIndex}:a?`);
+  if (audioOutputLabel) args.push('-map', `[${audioOutputLabel}]`);
+  else args.push('-an');
   args.push(
     '-t', duration.toFixed(3),
     '-r', String(renderFps),
@@ -762,7 +823,7 @@ export function startRenderShort(
     '-pix_fmt', 'yuv420p',
     '-movflags', '+faststart'
   );
-  if (audioInputIndex !== null) args.push('-c:a', 'aac', '-b:a', quality === 'final' ? '192k' : '128k');
+  if (audioOutputLabel) args.push('-c:a', 'aac', '-b:a', quality === 'final' ? '192k' : '128k');
   args.push(outputMp4);
 
   const started = Date.now();
