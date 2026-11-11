@@ -1,0 +1,13 @@
+.git
+.github
+node_modules
+dist
+coverage
+storage
+.env
+.env.*
+!.env.example
+*.log
+*.tar.gz
+.playwright-cli
+.playwright
