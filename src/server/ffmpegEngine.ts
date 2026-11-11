@@ -337,6 +337,22 @@ export function detectAndRemoveSilences(videoPath: string): SilenceAnalysisResul
     silences.push({ start: openStart, end: duration, duration: duration - openStart });
   }
 
+  // A fully silent recording is not a 0.2-second clip. Preserve it and report
+  // zero cuts so the user can replace/repair the audio instead of losing the video.
+  const isEntireTrackSilent = silences.length > 0 &&
+    silences[0].start <= 0.05 &&
+    silences[silences.length - 1].end >= duration - 0.05 &&
+    silences.reduce((sum, silence) => sum + silence.duration, 0) >= duration * 0.95;
+  if (isEntireTrackSilent) {
+    return {
+      silences,
+      totalSilencesRemoved: 0,
+      speechSegments: [{ start: 0, end: duration }],
+      originalDuration: duration,
+      adjustedDuration: duration
+    };
+  }
+
   // Keep a 90 ms guard band around detected silence to avoid clipping consonants.
   const speechSegments: Array<{ start: number; end: number }> = [];
   let cursor = 0;
