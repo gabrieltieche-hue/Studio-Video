@@ -14,6 +14,8 @@ export const PROJECTS_DIR = path.join(STORAGE_DIR, 'projects');
 export const COMPONENTS_DIR = path.join(STORAGE_DIR, 'components');
 export const JOBS_DIR = path.join(STORAGE_DIR, 'jobs');
 export const STYLES_DIR = path.join(STORAGE_DIR, 'styles');
+export const MUSIC_DIR = path.join(STORAGE_DIR, 'music');
+export const SFX_DIR = path.join(STORAGE_DIR, 'sfx');
 
 export interface WhisperWord {
   id: string;
@@ -140,7 +142,7 @@ export interface SourceVideo {
 
 // Initialize all storage directories
 export function initStorage() {
-  const dirs = [STORAGE_DIR, TAKES_DIR, RENDERS_DIR, PROJECTS_DIR, COMPONENTS_DIR, JOBS_DIR, STYLES_DIR];
+  const dirs = [STORAGE_DIR, TAKES_DIR, RENDERS_DIR, PROJECTS_DIR, COMPONENTS_DIR, JOBS_DIR, STYLES_DIR, MUSIC_DIR, SFX_DIR];
   for (const dir of dirs) {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
