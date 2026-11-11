@@ -59,13 +59,21 @@ export interface ShortProject {
   fps: number;
   resolution: { width: number; height: number };
   sourceVideoName?: string;
+  preparedVideoName?: string;
+  editSpec?: Record<string, unknown>;
+  silenceAnalysis?: {
+    totalSilencesRemoved: number;
+    originalDuration: number;
+    adjustedDuration: number;
+    speechSegments: Array<{ start: number; end: number }>;
+  };
   speakerVideoUrl?: string;
   audioTrackUrl?: string;
   currentVersion: string;
   versions: Array<{
     version: string;
     createdAt: string;
-    status: 'done' | 'current' | 'failed' | 'rendering';
+    status: 'done' | 'current' | 'failed' | 'rendering' | 'draft';
     duration: number;
     fps: number;
     notes: string;
@@ -161,6 +169,12 @@ export function saveProject(project: ShortProject) {
   if (project.motionComponents) {
     fs.writeFileSync(path.join(projectDir, 'components.json'), JSON.stringify(project.motionComponents, null, 2), 'utf-8');
   }
+  if (project.editSpec) {
+    fs.writeFileSync(path.join(projectDir, 'spec.json'), JSON.stringify(project.editSpec, null, 2), 'utf-8');
+  }
+  if (project.silenceAnalysis) {
+    fs.writeFileSync(path.join(projectDir, 'silence-analysis.json'), JSON.stringify(project.silenceAnalysis, null, 2), 'utf-8');
+  }
 }
 
 // Read project from disk
@@ -193,6 +207,12 @@ export function getAllProjects(): ShortProject[] {
           if (fs.existsSync(vFile)) {
             p.versions = JSON.parse(fs.readFileSync(vFile, 'utf-8'));
           }
+
+          const specFile = path.join(PROJECTS_DIR, entry.name, 'spec.json');
+          if (fs.existsSync(specFile)) p.editSpec = JSON.parse(fs.readFileSync(specFile, 'utf-8'));
+
+          const silenceFile = path.join(PROJECTS_DIR, entry.name, 'silence-analysis.json');
+          if (fs.existsSync(silenceFile)) p.silenceAnalysis = JSON.parse(fs.readFileSync(silenceFile, 'utf-8'));
 
           const tFile = path.join(PROJECTS_DIR, entry.name, 'transcript.json');
           if (fs.existsSync(tFile)) {
