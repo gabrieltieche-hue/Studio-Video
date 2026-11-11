@@ -768,21 +768,26 @@ async function executeToolCall(toolName: string, args: any) {
     }
 
     case 'make_reference_contact_sheet': {
-      const sourceName = String(args.source_filename || '');
-      const source = getAvailableTakes().find(video => video.name === sourceName);
-      if (!source?.path) throw new Error(`Vidéo de référence introuvable dans takes/: ${sourceName}`);
-      const outputPath = path.join(RENDERS_DIR, `reference-${path.parse(sourceName).name}-${Date.now()}.jpg`);
-      const ok = generateContactSheet(source.path, outputPath, source.duration);
+      const proj = getProject(args.project_id);
+      if (!proj) throw new Error(`Projet "${args.project_id}" introuvable.`);
+      const version = args.version && args.version !== 'current' ? String(args.version) : proj.currentVersion;
+      const mp4Path = path.join(RENDERS_DIR, `${proj.slug}_${version}.mp4`);
+      if (!fs.existsSync(mp4Path) || fs.statSync(mp4Path).size < 1024) {
+        throw new Error(`Le MP4 ${version} n’existe pas. Impossible de créer une planche de contact.`);
+      }
+      const outputPath = path.join(RENDERS_DIR, `${proj.slug}_${version}_contact.jpg`);
+      const ok = generateContactSheet(mp4Path, outputPath, probeVideo(mp4Path).duration);
       if (!ok || !fs.existsSync(outputPath) || fs.statSync(outputPath).size < 1024) {
         throw new Error('FFmpeg n’a pas produit de planche de contact exploitable.');
       }
       return {
         success: true,
-        sourceVideo: source.name,
+        projectId: proj.id,
+        version,
         contactSheetUrl: `/renders/${path.basename(outputPath)}`,
         outputBytes: fs.statSync(outputPath).size,
         qcPassed: false,
-        message: 'Planche de contact réelle générée. Le contrôle visuel doit encore être réalisé par le modèle.'
+        message: 'Planche de contact réelle extraite du MP4. Elle doit encore être inspectée visuellement avant toute validation QC.'
       };
     }
 
@@ -1662,8 +1667,30 @@ app.delete('/api/studio/projects/:id', (req: Request, res: Response) => {
   return res.json({ success: true, message: 'Projet supprimé du disque' });
 });
 
+app.post('/api/studio/videos/upload',
+  express.raw({ type: ['video/mp4', 'video/quicktime', 'video/webm', 'application/octet-stream'], limit: '250mb' }),
+  async (req: Request, res: Response) => {
+    try {
+      if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+        return res.status(400).json({ error: 'Corps vidéo vide ou Content-Type non pris en charge.' });
+      }
+      const rawName = req.header('x-file-name') || 'upload.mp4';
+      let filename = rawName;
+      try { filename = decodeURIComponent(rawName); } catch { /* validated by saveUploadedVideo */ }
+      const video = saveUploadedVideo(filename, req.body);
+      return res.status(201).json({ success: true, video });
+    } catch (error: any) {
+      return res.status(400).json({ error: error.message || 'Import vidéo échoué.' });
+    }
+  }
+);
+
 app.post('/api/studio/videos', async (req: Request, res: Response) => {
-  return res.json(await executeToolCall('upload_source_video', req.body));
+  try {
+    return res.json(await executeToolCall('upload_source_video', req.body));
+  } catch (error: any) {
+    return res.status(400).json({ error: error.message || 'Import vidéo échoué.' });
+  }
 });
 
 app.post('/api/studio/projects/:id/transcribe', async (req: Request, res: Response) => {
