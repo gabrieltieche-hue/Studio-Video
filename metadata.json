@@ -1,0 +1,6 @@
+{
+  "name": "Video Agent Studio VF",
+  "description": "Studio de montage et de production vidéo automatisé piloté par IA et ChatGPT via MCP. Création de Shorts 9:16 (Faceless Explainer & Split-Screen Clips) avec timeline multi-pistes, transcription Whisper synchronisée, inspecteur d'éléments, dessin sur frame et export de prompt de retours pour LLM.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
