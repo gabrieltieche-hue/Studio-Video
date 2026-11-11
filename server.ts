@@ -2,6 +2,7 @@ import express, { Request, Response } from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'fs';
+import { timingSafeEqual } from 'crypto';
 import { fileURLToPath } from 'url';
 import {
   initStorage,
@@ -49,13 +50,52 @@ initStorage();
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
-// Global CORS Middleware for ChatGPT Actions and MCP clients
+// CORS is permissive only for local development. Production origins must be explicitly configured.
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean);
+const production = process.env.NODE_ENV === 'production';
+
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
+  const origin = req.headers.origin;
+  if (!production) {
+    res.header('Access-Control-Allow-Origin', '*');
+  } else if (origin && allowedOrigins.includes(origin)) {
+    res.header('Access-Control-Allow-Origin', origin);
+    res.header('Vary', 'Origin');
+  }
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-File-Name');
+  res.header('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
+app.get('/healthz', (_req, res) => res.json({ status: 'ok' }));
+
+// Public schema/health endpoints are safe to inspect. All media and project data,
+// REST mutations and MCP calls require a bearer key in production.
+app.use((req, res, next) => {
+  const publicPaths = new Set(['/healthz', '/openapi.json', '/api/openapi.json', '/.well-known/openapi.json']);
+  const protectedPath = req.path.startsWith('/api/') || req.path === '/mcp' ||
+    req.path === '/sse' || req.path.startsWith('/mcp/') ||
+    req.path.startsWith('/takes/') || req.path.startsWith('/renders/') ||
+    req.path.startsWith('/storage/');
+  if (!production || !protectedPath || publicPaths.has(req.path)) return next();
+
+  const expected = process.env.STUDIO_API_KEY || '';
+  if (expected.length < 32) {
+    return res.status(503).json({ error: 'Production access is disabled: configure STUDIO_API_KEY (at least 32 characters) in the secret manager.' });
+  }
+  const authorization = req.header('authorization') || '';
+  const bearer = authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
+  const cookie = (req.headers.cookie || '').split(';').map(item => item.trim()).find(item => item.startsWith('studio_session='));
+  const candidate = bearer || (cookie ? decodeURIComponent(cookie.slice('studio_session='.length)) : '');
+  const left = Buffer.from(candidate);
+  const right = Buffer.from(expected);
+  if (left.length !== right.length || !timingSafeEqual(left, right)) {
+    return res.status(401).json({ error: 'Authentification requise. Fournissez la clé Video Agent Studio.' });
+  }
+  if (bearer && !cookie) {
+    res.setHeader('Set-Cookie', `studio_session=${encodeURIComponent(expected)}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=43200`);
   }
   next();
 });
