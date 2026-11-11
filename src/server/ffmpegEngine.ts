@@ -441,9 +441,6 @@ export async function extractAudioAndTranscribe(
   const source = probeVideo(sourceVideoPath);
   if (!source.hasAudio) throw new Error('La vidéo ne contient pas de piste audio : transcription impossible.');
 
-  if (overlays.length === 0) {
-    throw new Error('Aucune animation capturée dans motionTrack. Ajoutez au moins un composant de motion design avant le rendu.');
-  }
 
   const projectDir = path.join(PROJECTS_DIR, project.id);
   fs.mkdirSync(projectDir, { recursive: true });
