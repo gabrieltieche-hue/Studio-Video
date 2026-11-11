@@ -3,6 +3,8 @@ import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'fs';
 import { timingSafeEqual } from 'crypto';
+import { spawnSync } from 'child_process';
+import { chromium } from 'playwright';
 import { fileURLToPath } from 'url';
 import {
   initStorage,
@@ -340,12 +342,13 @@ const MCP_TOOLS = [
   },
   {
     name: 'make_reference_contact_sheet',
-    description: 'Extraire une planche de 12 images représentatives pour le contrôle qualité (QC)',
+    description: 'Extraire une planche de 12 images d’un rendu réel pour le contrôle qualité. Choisir draft ou final.',
     inputSchema: {
       type: 'object',
       properties: {
         project_id: { type: 'string', description: 'ID ou slug du projet' },
-        version: { type: 'string', default: 'current' }
+        version: { type: 'string', default: 'current' },
+        quality: { type: 'string', enum: ['draft', 'final'], default: 'draft' }
       },
       required: ['project_id']
     }
@@ -473,7 +476,7 @@ async function executeToolCall(toolName: string, args: any) {
       const takes = getAvailableTakes();
       const checkBinary = (binary: string) => {
         try {
-          const result = require('child_process').spawnSync(binary, ['-version'], { encoding: 'utf-8', timeout: 5000 });
+          const result = spawnSync(binary, ['-version'], { encoding: 'utf-8', timeout: 5000 });
           return result.status === 0;
         } catch { return false; }
       };
@@ -495,7 +498,7 @@ async function executeToolCall(toolName: string, args: any) {
           ffmpeg: checkBinary('ffmpeg'),
           ffprobe: checkBinary('ffprobe'),
           chromium: (() => {
-            try { return Boolean(process.env.PLAYWRIGHT_BROWSERS_PATH || process.env.CHROME_PATH || true); } catch { return false; }
+            try { return fs.existsSync(process.env.CHROME_PATH || chromium.executablePath()); } catch { return false; }
           })(),
           whisperCli: checkBinary(process.env.WHISPER_CLI_PATH || 'whisper-cli'),
           whisperModel: whisperModelPresent,
@@ -778,11 +781,19 @@ async function executeToolCall(toolName: string, args: any) {
       const nextV = args.version || activeDraft?.version || `v${nextNum}`;
 
       // Capture each actual timeline component before FFmpeg starts.
+      const splitLayout = proj.mode === 'split_screen_clips' &&
+        (proj.layoutTrack || []).some(item => item.layout === 'split');
       for (const item of proj.motionTrack || []) {
         const component = proj.motionComponents?.[item.componentId];
         if (!component) throw new Error(`Composant manquant pour la piste de mouvement: ${item.componentId}`);
         const duration = Math.max(0.5, Math.min(20, Number(item.end) - Number(item.start)));
-        await captureMotionComponentAsset(component.name, duration, Math.min(30, component.fps || 30), '1080x1920', Boolean(component.hasAlpha));
+        await captureMotionComponentAsset(
+          component.name,
+          duration,
+          Math.min(30, component.fps || 30),
+          splitLayout ? '1080x960' : '1080x1920',
+          Boolean(component.hasAlpha)
+        );
       }
 
       // Start FFmpeg only after source/spec/motion inputs have been checked.
@@ -857,11 +868,14 @@ async function executeToolCall(toolName: string, args: any) {
       const proj = getProject(args.project_id);
       if (!proj) throw new Error(`Projet "${args.project_id}" introuvable.`);
       const version = args.version && args.version !== 'current' ? String(args.version) : proj.currentVersion;
-      const mp4Path = path.join(RENDERS_DIR, `${proj.slug}_${version}.mp4`);
+      if (!/^v[0-9]{1,3}$/.test(version)) throw new Error('Identifiant de version invalide.');
+      const quality = args.quality === 'final' ? 'final' : 'draft';
+      const renderTag = quality === 'draft' ? `${version}_draft` : version;
+      const mp4Path = path.join(RENDERS_DIR, `${proj.slug}_${renderTag}.mp4`);
       if (!fs.existsSync(mp4Path) || fs.statSync(mp4Path).size < 1024) {
-        throw new Error(`Le MP4 ${version} n’existe pas. Impossible de créer une planche de contact.`);
+        throw new Error(`Le MP4 ${renderTag} n’existe pas. Impossible de créer une planche de contact.`);
       }
-      const outputPath = path.join(RENDERS_DIR, `${proj.slug}_${version}_contact.jpg`);
+      const outputPath = path.join(RENDERS_DIR, `${proj.slug}_${renderTag}_contact.jpg`);
       const ok = generateContactSheet(mp4Path, outputPath, probeVideo(mp4Path).duration);
       if (!ok || !fs.existsSync(outputPath) || fs.statSync(outputPath).size < 1024) {
         throw new Error('FFmpeg n’a pas produit de planche de contact exploitable.');
@@ -870,10 +884,11 @@ async function executeToolCall(toolName: string, args: any) {
         success: true,
         projectId: proj.id,
         version,
+        quality,
         contactSheetUrl: `/renders/${path.basename(outputPath)}`,
         outputBytes: fs.statSync(outputPath).size,
         qcPassed: false,
-        message: 'Planche de contact réelle extraite du MP4. Elle doit encore être inspectée visuellement avant toute validation QC.'
+        message: `Planche de contact réelle du rendu ${quality}. Inspection visuelle requise; la création de la planche ne valide pas le QC.`
       };
     }
 
