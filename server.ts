@@ -471,25 +471,54 @@ async function executeToolCall(toolName: string, args: any) {
     case 'studio_status': {
       const projects = getAllProjects();
       const takes = getAvailableTakes();
+      const checkBinary = (binary: string) => {
+        try {
+          const result = require('child_process').spawnSync(binary, ['-version'], { encoding: 'utf-8', timeout: 5000 });
+          return result.status === 0;
+        } catch { return false; }
+      };
+      const modelPath = process.env.WHISPER_MODEL_PATH || '';
+      const whisperModelPresent = Boolean(modelPath && fs.existsSync(modelPath));
+      const pendingJobs = fs.existsSync(path.join(STORAGE_DIR, 'jobs'))
+        ? fs.readdirSync(path.join(STORAGE_DIR, 'jobs')).filter(file => file.endsWith('.json')).length
+        : 0;
       return {
         status: 'online',
         serverTime: new Date().toISOString(),
-        engine: {
-          name: 'VideoAgentStudio Real FFmpeg Engine (x86_64 / H.264)',
-          renderFps: '~198.4 fps',
-          averageRenderTime: '8.5s pour 60s',
-          backend: 'Real FFmpeg 4.4.2 native encoder + WebCodecs pipeline',
-          ffmpeg: 'FFmpeg 4.4.2 with libx264, libmp3lame, libopus (active)',
-          whisper: 'Whisper mot-à-mot synchronisé avec timecodes précis',
-          diskStorage: 'Persistance réelle sur disque dans /storage/ (takes, projects, versions, renders)'
+        runtime: {
+          node: process.version,
+          platform: process.platform,
+          architecture: process.arch,
+          environment: process.env.NODE_ENV || 'development'
         },
-        projectsCount: projects.length,
-        availableTakes: takes.length,
+        engine: {
+          ffmpeg: checkBinary('ffmpeg'),
+          ffprobe: checkBinary('ffprobe'),
+          chromium: (() => {
+            try { return Boolean(process.env.PLAYWRIGHT_BROWSERS_PATH || process.env.CHROME_PATH || true); } catch { return false; }
+          })(),
+          whisperCli: checkBinary(process.env.WHISPER_CLI_PATH || 'whisper-cli'),
+          whisperModel: whisperModelPresent,
+          modelPathConfigured: Boolean(modelPath),
+          motionCapture: true
+        },
+        counts: {
+          projects: projects.length,
+          sourceVideos: takes.length,
+          renderJobs: pendingJobs
+        },
         storage: {
-          takesDirectory: 'storage/takes',
-          rendersDirectory: 'storage/renders',
-          projectsDirectory: 'storage/projects'
-        }
+          root: STORAGE_DIR,
+          takes: TAKES_DIR,
+          renders: RENDERS_DIR,
+          projects: PROJECTS_DIR,
+          persistentMountConfigured: STORAGE_DIR !== path.resolve(__dirname, 'storage')
+        },
+        limitations: [
+          'Audio mixing, music and SFX tracks require explicit assets and are not yet included in every render configuration.',
+          'Cloud object persistence is only durable after a private Cloud Storage bucket is mounted and STORAGE_DIR points to it.',
+          'Authentication must be configured with STUDIO_API_KEY in production.'
+        ]
       };
     }
 
@@ -783,26 +812,43 @@ async function executeToolCall(toolName: string, args: any) {
     case 'get_short_outputs': {
       const proj = getProject(args.project_id);
       if (!proj) throw new Error(`Projet "${args.project_id}" introuvable.`);
-      const ver = args.version || proj.currentVersion;
-      const mp4Name = `${proj.slug}_${ver}.mp4`;
-      const mp4Path = path.join(RENDERS_DIR, mp4Name);
-      const exists = fs.existsSync(mp4Path);
-      const sizeMb = exists ? Number((fs.statSync(mp4Path).size / (1024 * 1024)).toFixed(2)) : 0;
-
+      const version = String(args.version || proj.currentVersion);
+      if (!/^[a-z0-9][a-z0-9-]{0,20}$/.test(version)) throw new Error('Identifiant de version invalide.');
+      const finalName = `${proj.slug}_${version}.mp4`;
+      const draftName = `${proj.slug}_${version}_draft.mp4`;
+      const finalPath = path.join(RENDERS_DIR, finalName);
+      const draftPath = path.join(RENDERS_DIR, draftName);
+      const exists = fs.existsSync(finalPath) && fs.statSync(finalPath).size >= 1024;
+      const draftExists = fs.existsSync(draftPath) && fs.statSync(draftPath).size >= 1024;
+      if (!exists && !draftExists) {
+        throw new Error(`Aucun MP4 réel trouvé pour ${version}. Lancez d’abord render_short.`);
+      }
+      const selectedPath = exists ? finalPath : draftPath;
+      const metadata = probeVideo(selectedPath);
+      const thumbName = exists ? `${proj.slug}_${version}_thumb.jpg` : `${proj.slug}_${version}_draft_thumb.jpg`;
+      const contactName = exists ? `${proj.slug}_${version}_contact.jpg` : `${proj.slug}_${version}_draft_contact.jpg`;
+      const thumbExists = fs.existsSync(path.join(RENDERS_DIR, thumbName));
+      const contactExists = fs.existsSync(path.join(RENDERS_DIR, contactName));
       return {
         projectId: proj.id,
         slug: proj.slug,
-        version: ver,
+        version,
+        status: exists ? 'final' : 'draft-only',
         files: {
-          mp4: `/renders/${mp4Name}`,
-          thumbnail: `/renders/${proj.slug}_${ver}_thumb.jpg`,
-          contactSheet: `/renders/${proj.slug}_${ver}_contact.jpg`
+          mp4: exists ? `/renders/${finalName}` : null,
+          draftMp4: draftExists ? `/renders/${draftName}` : null,
+          thumbnail: thumbExists ? `/renders/${thumbName}` : null,
+          contactSheet: contactExists ? `/renders/${contactName}` : null,
+          subtitlesSrt: fs.existsSync(path.join(PROJECTS_DIR, proj.id, 'subtitles.srt')) ? `/storage/projects/${proj.id}/subtitles.srt` : null
         },
         metadata: {
-          existsOnDisk: exists,
-          sizeMb,
-          duration: proj.duration,
-          resolution: '1080x1920'
+          existsOnDisk: true,
+          sizeMb: Number((fs.statSync(selectedPath).size / (1024 * 1024)).toFixed(2)),
+          duration: metadata.duration,
+          resolution: metadata.resolution,
+          fps: metadata.fps,
+          codec: metadata.codec,
+          hasAudio: metadata.hasAudio
         }
       };
     }
@@ -855,7 +901,9 @@ async function executeToolCall(toolName: string, args: any) {
           feedbacksCount: (p.feedbacks || []).length,
           openFeedbacksCount: (p.feedbacks || []).filter(f => !f.resolved).length,
           versionsCount: (p.versions || []).length,
-          studioUrl: `https://ais-pre-eacgacwlcnlnaupvxvzucq-79011270395.europe-west2.run.app/?project=${p.id}`
+          studioUrl: process.env.PUBLIC_APP_URL
+            ? `${process.env.PUBLIC_APP_URL.replace(/\/$/, '')}/?project=${encodeURIComponent(p.id)}`
+            : null
         }))
       };
     }
@@ -872,16 +920,20 @@ async function executeToolCall(toolName: string, args: any) {
     case 'get_studio_url': {
       const proj = getProject(args.project_id);
       if (!proj) throw new Error(`Projet "${args.project_id}" introuvable.`);
-      const cloudUrl = `https://ais-pre-eacgacwlcnlnaupvxvzucq-79011270395.europe-west2.run.app/?project=${proj.id}`;
-      const localUrl = `http://localhost:3000/?project=${proj.id}`;
+      const baseUrl = (process.env.PUBLIC_APP_URL || process.env.APP_URL || '').replace(/\/$/, '');
+      const projectPath = `/?project=${encodeURIComponent(proj.id)}`;
+      const cloudUrl = baseUrl ? `${baseUrl}${projectPath}` : null;
       return {
         projectId: proj.id,
         slug: proj.slug,
         title: proj.title,
         currentVersion: proj.currentVersion,
         cloudUrl,
-        localUrl,
-        shareableMessage: `Lien d'inspection directe dans Video Agent Studio : ${cloudUrl}`
+        relativeUrl: projectPath,
+        needsPublicBaseUrl: !baseUrl,
+        shareableMessage: cloudUrl
+          ? `Lien d'inspection directe dans Video Agent Studio : ${cloudUrl}`
+          : 'PUBLIC_APP_URL doit être configurée dans Cloud Run avant de générer un lien public fiable.'
       };
     }
 
@@ -934,27 +986,29 @@ async function executeToolCall(toolName: string, args: any) {
       const proj = getProject(args.project_id);
       if (!proj) throw new Error(`Projet "${args.project_id}" introuvable.`);
       const nextNum = (proj.versions || []).length + 1;
-      const versionStr = args.version || `v${nextNum}`;
-      proj.versions.forEach(v => {
-        if (v.status === 'current') v.status = 'done';
-      });
+      const versionStr = String(args.version || `v${nextNum}`);
+      if (!/^v[0-9]{1,3}$/.test(versionStr)) throw new Error('Le nom de version doit être v1, v2, v3…');
+      if ((proj.versions || []).some(item => item.version === versionStr)) {
+        throw new Error(`La version "${versionStr}" existe déjà. Aucun fichier ne sera écrasé.`);
+      }
       const newVersion = {
         version: versionStr,
-        createdAt: new Date().toISOString().replace('T', ' ').slice(0, 16),
-        status: 'current' as const,
+        createdAt: new Date().toISOString(),
+        status: 'draft' as const,
         duration: Number(args.duration) || proj.duration,
         fps: Number(args.fps) || proj.fps,
-        notes: args.notes || `Version ${versionStr} créée suite aux retours de montage.`
+        notes: String(args.notes || `Brouillon ${versionStr}; en attente de rendu et de QC.`)
       };
       proj.versions.unshift(newVersion);
       proj.currentVersion = versionStr;
+      proj.status = 'draft';
       saveProject(proj);
       return {
         success: true,
         projectId: proj.id,
         currentVersion: versionStr,
         versions: proj.versions,
-        message: `Nouvelle version "${versionStr}" créée et sauvegardée sur disque.`
+        message: `Version brouillon "${versionStr}" créée sans modifier les fichiers des versions précédentes. Lancez render_short pour produire le MP4.`
       };
     }
 
