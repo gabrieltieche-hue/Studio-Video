@@ -7,7 +7,7 @@ const __dirname = path.dirname(__filename);
 
 // Root storage paths
 export const ROOT_DIR = path.resolve(__dirname, '../../');
-export const STORAGE_DIR = path.resolve(ROOT_DIR, 'storage');
+export const STORAGE_DIR = path.resolve(process.env.STORAGE_DIR || path.join(ROOT_DIR, 'storage'));
 export const TAKES_DIR = path.join(STORAGE_DIR, 'takes');
 export const RENDERS_DIR = path.join(STORAGE_DIR, 'renders');
 export const PROJECTS_DIR = path.join(STORAGE_DIR, 'projects');
