@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
-import { execSync, spawn } from 'child_process';
+import { execFileSync, spawn, spawnSync } from 'child_process';
+import { chromium } from 'playwright';
 import {
   TAKES_DIR,
   RENDERS_DIR,
@@ -32,65 +33,59 @@ export interface RenderJob {
   completedAt?: string;
 }
 
-// Probing video file with ffprobe
+// Probe media with FFprobe. Invalid files are errors, never synthetic metadata.
 export function probeVideo(filePath: string) {
-  try {
-    const cmd = `ffprobe -v error -show_entries format=duration,size,bit_rate -show_entries stream=width,height,r_frame_rate,codec_name -of json "${filePath}"`;
-    const out = execSync(cmd, { encoding: 'utf-8' });
-    const data = JSON.parse(out);
-    const videoStream = data.streams?.find((s: any) => s.codec_name !== 'aac' && s.width) || data.streams?.[0] || {};
-    const duration = Number(data.format?.duration) || 30.0;
-    const size = Number(data.format?.size) || 0;
-    const sizeMb = Number((size / (1024 * 1024)).toFixed(2));
-    const width = videoStream.width || 1080;
-    const height = videoStream.height || 1920;
-
-    let fps = 30;
-    if (videoStream.r_frame_rate) {
-      const parts = videoStream.r_frame_rate.split('/');
-      if (parts.length === 2 && Number(parts[1]) > 0) {
-        fps = Math.round(Number(parts[0]) / Number(parts[1]));
-      }
-    }
-
-    return {
-      duration: Number(duration.toFixed(2)),
-      sizeMb,
-      width,
-      height,
-      fps,
-      resolution: `${width}x${height}`,
-      codec: videoStream.codec_name || 'h264'
-    };
-  } catch {
-    return {
-      duration: 30.0,
-      sizeMb: 10.0,
-      width: 1080,
-      height: 1920,
-      fps: 30,
-      resolution: '1080x1920',
-      codec: 'h264'
-    };
-  }
+  if (!fs.existsSync(filePath)) throw new Error(`Fichier média introuvable: ${path.basename(filePath)}`);
+  const output = execFileSync('ffprobe', [
+    '-v', 'error',
+    '-show_entries', 'format=duration,size,bit_rate',
+    '-show_entries', 'stream=codec_type,width,height,r_frame_rate,codec_name',
+    '-of', 'json',
+    filePath
+  ], { encoding: 'utf-8', timeout: 120_000, maxBuffer: 16 * 1024 * 1024 });
+  const data = JSON.parse(output);
+  const videoStream = data.streams?.find((stream: any) => stream.codec_type === 'video');
+  if (!videoStream) throw new Error('Le fichier ne contient aucun flux vidéo lisible.');
+  const duration = Number(data.format?.duration);
+  if (!Number.isFinite(duration) || duration <= 0) throw new Error('Durée vidéo invalide dans FFprobe.');
+  const size = Number(data.format?.size) || fs.statSync(filePath).size;
+  const fpsParts = String(videoStream.r_frame_rate || '30/1').split('/');
+  const fps = Number(fpsParts[1]) > 0 ? Number(fpsParts[0]) / Number(fpsParts[1]) : 30;
+  return {
+    duration: Number(duration.toFixed(3)),
+    sizeMb: Number((size / (1024 * 1024)).toFixed(2)),
+    width: Number(videoStream.width),
+    height: Number(videoStream.height),
+    fps: Number(fps.toFixed(3)),
+    resolution: `${videoStream.width}x${videoStream.height}`,
+    codec: String(videoStream.codec_name || 'unknown'),
+    hasAudio: Boolean(data.streams?.some((stream: any) => stream.codec_type === 'audio'))
+  };
 }
 
-// Extract JPEG thumbnail from video
+// Extract a real thumbnail. Return false only when FFmpeg failed to create it.
 export function extractThumbnail(videoPath: string, outputPath: string, timeSec = 1.0): boolean {
   try {
-    execSync(`ffmpeg -y -ss ${timeSec} -i "${videoPath}" -vframes 1 -q:v 2 "${outputPath}" 2>/dev/null`);
-    return fs.existsSync(outputPath);
+    execFileSync('ffmpeg', ['-y', '-ss', String(Math.max(0, timeSec)), '-i', videoPath, '-frames:v', '1', '-q:v', '2', outputPath], {
+      stdio: 'ignore',
+      timeout: 120_000
+    });
+    return fs.existsSync(outputPath) && fs.statSync(outputPath).size > 0;
   } catch {
     return false;
   }
 }
 
-// Generate 12-frame contact sheet from video
+// Generate a 12-frame contact sheet from the supplied video.
 export function generateContactSheet(videoPath: string, outputPath: string, durationSec = 30.0): boolean {
   try {
-    const interval = Math.max(0.2, durationSec / 12).toFixed(2);
-    execSync(`ffmpeg -y -i "${videoPath}" -vf "fps=1/${interval},scale=360:640,tile=4x3" -vframes 1 -q:v 2 "${outputPath}" 2>/dev/null`);
-    return fs.existsSync(outputPath);
+    const interval = Math.max(0.2, durationSec / 12).toFixed(3);
+    execFileSync('ffmpeg', [
+      '-y', '-i', videoPath,
+      '-vf', `fps=1/${interval},scale=360:640:force_original_aspect_ratio=decrease,pad=360:640:(ow-iw)/2:(oh-ih)/2,tile=4x3`,
+      '-frames:v', '1', '-q:v', '2', outputPath
+    ], { stdio: 'ignore', timeout: 180_000 });
+    return fs.existsSync(outputPath) && fs.statSync(outputPath).size > 0;
   } catch {
     return false;
   }
@@ -213,8 +208,7 @@ export function getJob(jobId: string): RenderJob | null {
 }
 
 // -------------------------------------------------------------
-// REAL SILENCE DETECTION & REMOVAL WITH FFMPEG
-// -------------------------------------------------------------
+// Detect silences from the real audio stream with FFmpeg.
 export interface SilenceInterval {
   start: number;
   end: number;
@@ -230,215 +224,241 @@ export interface SilenceAnalysisResult {
 }
 
 export function detectAndRemoveSilences(videoPath: string): SilenceAnalysisResult {
-  const probe = probeVideo(videoPath);
-  const dur = probe.duration;
-
-  let maxVol = -20;
-  try {
-    const volOut = execSync(`ffmpeg -i "${videoPath}" -af volumedetect -f null - 2>&1`, { encoding: 'utf-8' });
-    const matchMax = volOut.match(/max_volume:\s*([-\d.]+)\s*dB/);
-    if (matchMax) {
-      maxVol = parseFloat(matchMax[1]);
-    }
-  } catch {
-    // Keep default maxVol
+  const media = probeVideo(videoPath);
+  const duration = media.duration;
+  if (!media.hasAudio) {
+    return {
+      silences: [],
+      totalSilencesRemoved: 0,
+      speechSegments: [{ start: 0, end: duration }],
+      originalDuration: duration,
+      adjustedDuration: duration
+    };
   }
 
-  // If the audio track is essentially silent (-60dB or lower), silence threshold cannot be computed reliably
+  const detection = spawnSync('ffmpeg', [
+    '-hide_banner', '-nostats', '-i', videoPath,
+    '-af', 'silencedetect=noise=-35dB:d=0.40',
+    '-f', 'null', '-'
+  ], { encoding: 'utf-8', timeout: 30 * 60 * 1000, maxBuffer: 32 * 1024 * 1024 });
+
+  if (detection.error) throw new Error(`Impossible de lancer FFmpeg pour détecter les silences: ${detection.error.message}`);
+  if (detection.status !== 0) throw new Error(`La détection des silences a échoué: ${String(detection.stderr || '').slice(-1200)}`);
+
+  const log = String(detection.stderr || '');
   const silences: SilenceInterval[] = [];
-  let totalRemoved = 0;
-
-  if (maxVol > -60) {
-    const noiseThreshold = Math.max(-50, Math.min(-25, Math.round(maxVol - 15)));
-    try {
-      const silenceCmd = `ffmpeg -i "${videoPath}" -af "silencedetect=noise=${noiseThreshold}dB:d=0.3" -f null - 2>&1`;
-      const out = execSync(silenceCmd, { encoding: 'utf-8' });
-      const lines = out.split('\n');
-
-      let currentStart: number | null = null;
-      for (const line of lines) {
-        const startMatch = line.match(/silence_start:\s*([\d.]+)/);
-        if (startMatch) {
-          currentStart = parseFloat(startMatch[1]);
-        }
-        const endMatch = line.match(/silence_end:\s*([\d.]+)\s*\|\s*silence_duration:\s*([\d.]+)/);
-        if (endMatch) {
-          const end = parseFloat(endMatch[1]);
-          const duration = parseFloat(endMatch[2]);
-          const start = currentStart !== null ? currentStart : Math.max(0, end - duration);
-          silences.push({
-            start: Number(start.toFixed(2)),
-            end: Number(end.toFixed(2)),
-            duration: Number(duration.toFixed(2))
-          });
-          totalRemoved += duration;
-          currentStart = null;
-        }
-      }
-    } catch (e) {
-      console.error('Silencedetect error:', e);
+  let openStart: number | null = null;
+  for (const line of log.split(/\r?\n/)) {
+    const startMatch = line.match(/silence_start:\s*([\d.]+)/);
+    if (startMatch) openStart = Number(startMatch[1]);
+    const endMatch = line.match(/silence_end:\s*([\d.]+)\s*\|\s*silence_duration:\s*([\d.]+)/);
+    if (endMatch) {
+      const end = Math.min(duration, Number(endMatch[1]));
+      const rawDuration = Number(endMatch[2]);
+      const start = Math.max(0, openStart ?? end - rawDuration);
+      if (end > start && end - start >= 0.40) silences.push({ start, end, duration: end - start });
+      openStart = null;
     }
   }
+  if (openStart !== null && duration > openStart) {
+    silences.push({ start: openStart, end: duration, duration: duration - openStart });
+  }
 
-  // Calculate speech segments (inverse of silences)
+  // Keep a 90 ms guard band around detected silence to avoid clipping consonants.
   const speechSegments: Array<{ start: number; end: number }> = [];
-  let cursor = 0.0;
-  for (const s of silences) {
-    if (s.start > cursor + 0.1) {
-      speechSegments.push({
-        start: Number(cursor.toFixed(2)),
-        end: Number(s.start.toFixed(2))
-      });
-    }
-    cursor = Math.max(cursor, s.end);
+  let cursor = 0;
+  let removed = 0;
+  for (const silence of silences) {
+    const cutStart = Math.min(duration, silence.start + 0.09);
+    const cutEnd = Math.max(cutStart, silence.end - 0.09);
+    if (cutStart > cursor + 0.05) speechSegments.push({ start: cursor, end: cutStart });
+    removed += Math.max(0, cutEnd - Math.max(cursor, cutStart));
+    cursor = Math.max(cursor, cutEnd);
   }
-  if (cursor < dur - 0.1) {
-    speechSegments.push({
-      start: Number(cursor.toFixed(2)),
-      end: Number(dur.toFixed(2))
-    });
-  }
-
+  if (duration > cursor + 0.05) speechSegments.push({ start: cursor, end: duration });
   if (speechSegments.length === 0) {
-    speechSegments.push({ start: 0, end: dur });
+    speechSegments.push({ start: 0, end: duration });
+    removed = 0;
   }
 
-  const adjustedDuration = Math.max(1.0, Number((dur - totalRemoved).toFixed(2)));
-
+  const adjustedDuration = Number(speechSegments.reduce((sum, segment) => sum + segment.end - segment.start, 0).toFixed(3));
   return {
     silences,
-    totalSilencesRemoved: Number(totalRemoved.toFixed(2)),
-    speechSegments,
-    originalDuration: dur,
+    totalSilencesRemoved: Number(removed.toFixed(3)),
+    speechSegments: speechSegments.map(segment => ({
+      start: Number(segment.start.toFixed(3)),
+      end: Number(segment.end.toFixed(3))
+    })),
+    originalDuration: duration,
     adjustedDuration
   };
 }
 
-// -------------------------------------------------------------
-// REAL AUDIO EXTRACTION & TRANSCRIPTION
-// -------------------------------------------------------------
+// Render the silence-trimmed result to a real MP4. The source remains untouched.
+export function prepareShortMedia(project: ShortProject, sourceVideoPath: string) {
+  const analysis = detectAndRemoveSilences(sourceVideoPath);
+  project.silenceAnalysis = {
+    totalSilencesRemoved: analysis.totalSilencesRemoved,
+    originalDuration: analysis.originalDuration,
+    adjustedDuration: analysis.adjustedDuration,
+    speechSegments: analysis.speechSegments
+  };
+
+  if (analysis.totalSilencesRemoved < 0.20 || analysis.speechSegments.length < 2) {
+    project.preparedVideoName = undefined;
+    return { ...analysis, outputPath: sourceVideoPath, outputName: path.basename(sourceVideoPath), changed: false };
+  }
+
+  const segments = analysis.speechSegments;
+  const graph: string[] = [];
+  const labels: string[] = [];
+  for (let index = 0; index < segments.length; index++) {
+    const segment = segments[index];
+    const start = segment.start.toFixed(3);
+    const end = segment.end.toFixed(3);
+    graph.push(`[0:v:0]trim=start=${start}:end=${end},setpts=PTS-STARTPTS[v${index}]`);
+    if (probeVideo(sourceVideoPath).hasAudio) {
+      graph.push(`[0:a:0]atrim=start=${start}:end=${end},asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0[a${index}]`);
+      labels.push(`[v${index}][a${index}]`);
+    } else {
+      labels.push(`[v${index}]`);
+    }
+  }
+  const hasAudio = probeVideo(sourceVideoPath).hasAudio;
+  graph.push(`${labels.join('')}concat=n=${segments.length}:v=1:a=${hasAudio ? 1 : 0}[vout]${hasAudio ? '[aout]' : ''}`);
+
+  const outputName = `prepared-${project.slug}-${Date.now()}.mp4`;
+  const outputPath = path.join(TAKES_DIR, outputName);
+  const args = ['-y', '-i', sourceVideoPath, '-filter_complex', graph.join(';'), '-map', '[vout]'];
+  if (hasAudio) args.push('-map', '[aout]', '-c:a', 'aac', '-b:a', '160k');
+  args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', outputPath);
+
+  execFileSync('ffmpeg', args, { stdio: 'pipe', timeout: 60 * 60 * 1000, maxBuffer: 32 * 1024 * 1024 });
+  if (!fs.existsSync(outputPath) || fs.statSync(outputPath).size === 0) {
+    throw new Error('FFmpeg a terminé sans produire de fichier vidéo préparé.');
+  }
+  const result = probeVideo(outputPath);
+  project.preparedVideoName = outputName;
+  project.duration = result.duration;
+  return { ...analysis, outputPath, outputName, outputDuration: result.duration, changed: true };
+}
+
+// Extract audio and run the configured whisper.cpp CLI. No transcript is fabricated.
 export async function extractAudioAndTranscribe(
   project: ShortProject,
   sourceVideoPath: string,
   language = 'fr'
 ): Promise<WhisperWord[]> {
+  const source = probeVideo(sourceVideoPath);
+  if (!source.hasAudio) throw new Error('La vidéo ne contient pas de piste audio : transcription impossible.');
+
   const projectDir = path.join(PROJECTS_DIR, project.id);
-  if (!fs.existsSync(projectDir)) fs.mkdirSync(projectDir, { recursive: true });
+  fs.mkdirSync(projectDir, { recursive: true });
+  const wavPath = path.join(projectDir, 'audio-16khz-mono.wav');
+  execFileSync('ffmpeg', [
+    '-y', '-i', sourceVideoPath, '-map', '0:a:0', '-vn',
+    '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wavPath
+  ], { stdio: 'pipe', timeout: 30 * 60 * 1000, maxBuffer: 32 * 1024 * 1024 });
 
-  const wavPath = path.join(projectDir, 'audio.wav');
+  const whisperCli = process.env.WHISPER_CLI_PATH || 'whisper-cli';
+  const modelPath = process.env.WHISPER_MODEL_PATH;
+  if (!modelPath || !fs.existsSync(modelPath)) {
+    throw new Error('Modèle Whisper absent. Configurez WHISPER_MODEL_PATH avec un modèle whisper.cpp valide.');
+  }
 
-  // Extract 16kHz mono audio via FFmpeg
+  let rawOutput = '';
   try {
-    execSync(`ffmpeg -y -i "${sourceVideoPath}" -vn -ar 16000 -ac 1 -c:a pcm_s16le "${wavPath}" 2>/dev/null`);
-  } catch (e) {
-    console.error('Audio extraction error:', e);
-  }
-
-  // Check if existing transcript words are available
-  let words: WhisperWord[] = [];
-  if (project.transcript && project.transcript.length > 0) {
-    words = project.transcript;
-  } else {
-    // Standard Melvyn/Shorts script words aligned with detected speech
-    const defaultText =
-      "Tout le monde monte ses vidéos avec Claude Code mais personne ne te dit comment ou alors ils te font payer Donc je vais tout te montrer chaque prompt chaque étape et chaque outil dont tu as besoin pour créer ton propre monteur IA D'abord il te faut Claude Code mais ne l'utilise pas dans le navigateur Télécharge l'application Claude sur ton ordi et en haut à gauche choisis l'onglet Code Ensuite créé un dossier sur ton ordinateur et appelle le Monteur IA Dans ce dossier tu vas créer trois sous-dossiers Le premier tu vas l'appeler A-roll pour les rushs principaux que tu as envie de monter Le deuxième tu vas pouvoir mettre tes références tes inspirations";
-
-    const rawWords = defaultText.split(/\s+/);
-    const probe = probeVideo(sourceVideoPath);
-    const duration = probe.duration || 30.0;
-    const wordDur = duration / Math.max(rawWords.length, 1);
-
-    words = rawWords.map((w, idx) => {
-      const start = Number((idx * wordDur).toFixed(2));
-      const end = Number(((idx + 1) * wordDur).toFixed(2));
-      return {
-        id: `w-${idx + 1}`,
-        word: w,
-        start,
-        end,
-        confidence: 0.96,
-        isCut: false
-      };
+    rawOutput = execFileSync(whisperCli, [
+      '-m', modelPath, '-f', wavPath, '-l', language, '-ml', '1', '-np'
+    ], {
+      encoding: 'utf-8',
+      timeout: 60 * 60 * 1000,
+      maxBuffer: 64 * 1024 * 1024
     });
+  } catch (error: any) {
+    const detail = String(error?.stderr || error?.message || 'erreur inconnue').slice(-1600);
+    throw new Error(`whisper.cpp a échoué: ${detail}`);
   }
 
-  // Persist transcript files to project directory
-  fs.writeFileSync(path.join(projectDir, 'transcript.json'), JSON.stringify(words, null, 2), 'utf-8');
-
-  // Generate SRT format
-  let srtContent = '';
-  const chunkSize = 5;
-  for (let i = 0; i < words.length; i += chunkSize) {
-    const chunk = words.slice(i, i + chunkSize);
-    const index = Math.floor(i / chunkSize) + 1;
-    const startSec = chunk[0].start;
-    const endSec = chunk[chunk.length - 1].end;
-
-    const formatSrtTime = (sec: number) => {
-      const h = Math.floor(sec / 3600).toString().padStart(2, '0');
-      const m = Math.floor((sec % 3600) / 60).toString().padStart(2, '0');
-      const s = Math.floor(sec % 60).toString().padStart(2, '0');
-      const ms = Math.floor((sec % 1) * 1000).toString().padStart(3, '0');
-      return `${h}:${m}:${s},${ms}`;
-    };
-
-    srtContent += `${index}\n${formatSrtTime(startSec)} --> ${formatSrtTime(endSec)}\n${chunk.map(c => c.word).join(' ')}\n\n`;
-  }
-  fs.writeFileSync(path.join(projectDir, 'subtitles.srt'), srtContent, 'utf-8');
-
-  // Generate ASS (Advanced SubStation Alpha) with dynamic typography
-  const assHeader = `[Script Info]
-Title: VideoAgentStudio Subtitles
-ScriptType: v4.00+
-PlayResX: 1080
-PlayResY: 1920
-
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Noto Sans,52,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,4,2,2,40,40,260,1
-Style: Highlight,Noto Sans,56,&H000088FF,&H0000FFFF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,5,3,2,40,40,260,1
-
-[Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-`;
-
-  let assEvents = '';
-  const formatAssTime = (sec: number) => {
-    const h = Math.floor(sec / 3600).toString();
-    const m = Math.floor((sec % 3600) / 60).toString().padStart(2, '0');
-    const s = Math.floor(sec % 60).toString().padStart(2, '0');
-    const cs = Math.floor((sec % 1) * 100).toString().padStart(2, '0');
-    return `${h}:${m}:${s}.${cs}`;
+  const toSeconds = (stamp: string) => {
+    const match = stamp.match(/^(\d+):(\d{2}):(\d{2})\.(\d{3})$/);
+    if (!match) return NaN;
+    return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]) + Number(match[4]) / 1000;
   };
 
-  for (let i = 0; i < words.length; i += 4) {
-    const chunk = words.slice(i, i + 4);
-    for (let j = 0; j < chunk.length; j++) {
-      const currentWord = chunk[j];
-      const start = formatAssTime(currentWord.start);
-      const end = formatAssTime(currentWord.end);
-
-      // Color current word in vibrant Claude orange/yellow
-      const text = chunk
-        .map((w, idx) => (idx === j ? `{\\c&H000088FF\\b1}${w.word}{\\c&H00FFFFFF\\b0}` : w.word))
-        .join(' ');
-
-      assEvents += `Dialogue: 0,${start},${end},Default,,0,0,0,,${text}\n`;
+  const words: WhisperWord[] = [];
+  const timestampPattern = /^\s*\[(\d+:\d{2}:\d{2}\.\d{3})\s*-->\s*(\d+:\d{2}:\d{2}\.\d{3})\]\s*(.*?)\s*$/;
+  for (const line of rawOutput.split(/\r?\n/)) {
+    const match = line.match(timestampPattern);
+    if (!match || !match[3]) continue;
+    const start = toSeconds(match[1]);
+    const end = toSeconds(match[2]);
+    const token = match[3].trim();
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
+    if (/^[,.;:!?…’'"\])}]+$/.test(token) && words.length > 0) {
+      words[words.length - 1].word += token;
+      words[words.length - 1].end = end;
+    } else {
+      words.push({
+        id: `w-${words.length + 1}`,
+        word: token,
+        start: Number(start.toFixed(3)),
+        end: Number(end.toFixed(3)),
+        confidence: 0
+      });
     }
   }
 
-  fs.writeFileSync(path.join(projectDir, 'subtitles.ass'), assHeader + assEvents, 'utf-8');
+  if (words.length === 0) {
+    throw new Error('whisper.cpp a terminé mais aucun segment horodaté n’a été reconnu. Aucune transcription fictive n’a été créée.');
+  }
 
+  fs.writeFileSync(path.join(projectDir, 'transcript.json'), JSON.stringify(words, null, 2), 'utf-8');
+  const formatSrtTime = (sec: number) => {
+    const h = Math.floor(sec / 3600).toString().padStart(2, '0');
+    const m = Math.floor((sec % 3600) / 60).toString().padStart(2, '0');
+    const ss = Math.floor(sec % 60).toString().padStart(2, '0');
+    const ms = Math.floor((sec % 1) * 1000).toString().padStart(3, '0');
+    return `${h}:${m}:${ss},${ms}`;
+  };
+  let srt = '';
+  const chunkSize = 4;
+  for (let i = 0; i < words.length; i += chunkSize) {
+    const cue = words.slice(i, i + chunkSize);
+    srt += `${Math.floor(i / chunkSize) + 1}\n${formatSrtTime(cue[0].start)} --> ${formatSrtTime(cue[cue.length - 1].end)}\n${cue.map(item => item.word).join(' ')}\n\n`;
+  }
+  fs.writeFileSync(path.join(projectDir, 'subtitles.srt'), srt, 'utf-8');
+
+  const formatAssTime = (sec: number) => {
+    const h = Math.floor(sec / 3600).toString();
+    const m = Math.floor((sec % 3600) / 60).toString().padStart(2, '0');
+    const ss = Math.floor(sec % 60).toString().padStart(2, '0');
+    const cs = Math.floor((sec % 1) * 100).toString().padStart(2, '0');
+    return `${h}:${m}:${ss}.${cs}`;
+  };
+  const assHeader = `[Script Info]\nTitle: VideoAgentStudio Subtitles\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\n\n[V4+ Styles]\nFormat: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\nStyle: Default,Noto Sans,52,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,4,2,2,40,40,260,1\n\n[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n`;
+  let assEvents = '';
+  for (let i = 0; i < words.length; i += 4) {
+    const cue = words.slice(i, i + 4);
+    for (let j = 0; j < cue.length; j++) {
+      const text = cue.map((item, index) => index === j
+        ? `{\\c&H000088FF\\b1}${item.word}{\\c&H00FFFFFF\\b0}`
+        : item.word).join(' ');
+      assEvents += `Dialogue: 0,${formatAssTime(cue[j].start)},${formatAssTime(cue[j].end)},Default,,0,0,0,,${text}\n`;
+    }
+  }
+  fs.writeFileSync(path.join(projectDir, 'subtitles.ass'), assHeader + assEvents, 'utf-8');
+  project.transcript = words;
   return words;
 }
 
-// -------------------------------------------------------------
-// REAL MOTION COMPONENT CAPTURE WITH HEADLESS BROWSER & FFMPEG
-// -------------------------------------------------------------
+// Render every frame of a time-driven HTML component in a real headless Chromium page.
 export async function captureMotionComponentAsset(
   componentName: string,
   durationSec = 3.0,
-  fps = 30
+  fps = 30,
+  resolution: '540x960' | '1080x1920' = '1080x1920',
+  alpha = false
 ): Promise<{
   pngPath: string;
   pngUrl: string;
@@ -447,107 +467,74 @@ export async function captureMotionComponentAsset(
   framesCount: number;
   sizeBytes: number;
 }> {
-  if (!fs.existsSync(COMPONENTS_DIR)) fs.mkdirSync(COMPONENTS_DIR, { recursive: true });
-  if (!fs.existsSync(RENDERS_DIR)) fs.mkdirSync(RENDERS_DIR, { recursive: true });
+  const safeName = componentName.replace(/[^a-zA-Z0-9_-]/g, '_');
+  if (!safeName || safeName !== componentName) throw new Error('Nom de composant invalide.');
+  if (!Number.isFinite(durationSec) || durationSec < 0.5 || durationSec > 20) throw new Error('Durée de capture invalide.');
+  if (!Number.isInteger(fps) || fps < 12 || fps > 30) throw new Error('FPS de capture invalide.');
+  fs.mkdirSync(COMPONENTS_DIR, { recursive: true });
+  fs.mkdirSync(RENDERS_DIR, { recursive: true });
+  fs.mkdirSync(JOBS_DIR, { recursive: true });
 
-  const htmlPath = path.join(COMPONENTS_DIR, `${componentName}.html`);
-  const pngPath = path.join(COMPONENTS_DIR, `${componentName}.png`);
-  const mp4Path = path.join(RENDERS_DIR, `component_${componentName}.mp4`);
-
-  // Ensure HTML component exists
-  if (!fs.existsSync(htmlPath)) {
-    const cleanLabel = componentName.replace(/([A-Z])/g, ' $1').trim();
-    const htmlCode = `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-  body {
-    margin: 0;
-    background: transparent;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 1080px;
-    height: 1080px;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  }
-  .badge {
-    background: #18181b;
-    border: 2px solid #ff6b00;
-    color: white;
-    padding: 24px 48px;
-    border-radius: 40px;
-    font-size: 44px;
-    font-weight: 800;
-    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.7);
-    display: flex;
-    align-items: center;
-    gap: 20px;
-    letter-spacing: -0.5px;
-  }
-  .icon {
-    width: 44px;
-    height: 44px;
-    background: #ff6b00;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 26px;
-  }
-</style>
-</head>
-<body>
-  <div class="badge">
-    <div class="icon">&#9889;</div>
-    <span>${cleanLabel}</span>
-  </div>
-</body>
-</html>`;
-    fs.writeFileSync(htmlPath, htmlCode, 'utf-8');
-  }
-
-  // Render PNG with playwright-cli headless browser via local HTTP
-  try {
-    const session = `render-comp-${Date.now()}`;
-    const url = `http://localhost:3000/storage/components/${componentName}.html`;
-    execSync(`playwright-cli -s=${session} open "${url}" 2>/dev/null`);
-    execSync(`playwright-cli -s=${session} resize 1080 1080 2>/dev/null`);
-    execSync(`playwright-cli -s=${session} screenshot --filename="${pngPath}" 2>/dev/null`);
-    execSync(`playwright-cli -s=${session} close 2>/dev/null`);
-  } catch {
-    // If playwright-cli encounters issue, generate fallback clean PNG via FFmpeg lavfi
-    if (!fs.existsSync(pngPath)) {
-      execSync(
-        `ffmpeg -y -f lavfi -i color=c=0x18181b:s=800x240:d=1 -vf "drawtext=text='${componentName}':fontsize=42:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2" -vframes 1 "${pngPath}" 2>/dev/null`
-      );
-    }
-  }
-
-  // Convert PNG to animated MP4 overlay with faststart
+  const htmlPath = path.join(COMPONENTS_DIR, `${safeName}.html`);
+  if (!fs.existsSync(htmlPath)) throw new Error(`Composant HTML introuvable: ${safeName}`);
+  const html = fs.readFileSync(htmlPath, 'utf-8');
+  const [width, height] = resolution.split('x').map(Number);
   const framesCount = Math.round(durationSec * fps);
+  if (framesCount < 1 || framesCount > 600) throw new Error('Nombre d’images de capture hors limites.');
+
+  const frameDir = fs.mkdtempSync(path.join(JOBS_DIR, `motion-${safeName}-`));
+  const pngPath = path.join(COMPONENTS_DIR, `${safeName}.png`);
+  const ext = alpha ? 'mov' : 'mp4';
+  const mp4Path = path.join(COMPONENTS_DIR, `${safeName}.${ext}`);
+  let browser: any;
   try {
-    execSync(
-      `ffmpeg -y -loop 1 -i "${pngPath}" -c:v libx264 -t ${durationSec} -r ${fps} -pix_fmt yuv420p -movflags +faststart "${mp4Path}" 2>/dev/null`
-    );
-  } catch (e) {
-    console.error('Motion component MP4 render error:', e);
+    browser = await chromium.launch({ headless: true, args: ['--disable-dev-shm-usage'] });
+    const page = await browser.newPage({
+      viewport: { width, height },
+      deviceScaleFactor: 1
+    });
+    await page.route('**/*', route => {
+      const requestUrl = route.request().url();
+      if (requestUrl.startsWith('data:') || requestUrl.startsWith('blob:') || requestUrl.startsWith('about:')) return route.continue();
+      return route.abort();
+    });
+    await page.setContent(html, { waitUntil: 'load', timeout: 30_000 });
+    const hasTimelineFunction = await page.evaluate(() => typeof (window as any).setT === 'function');
+    if (!hasTimelineFunction) throw new Error('Le composant doit définir window.setT(t) pour être animé.');
+    for (let frame = 0; frame < framesCount; frame++) {
+      const t = framesCount <= 1 ? 0 : frame / (framesCount - 1);
+      await page.evaluate((time: number) => (window as any).setT(time), t);
+      const framePath = path.join(frameDir, `${String(frame).padStart(6, '0')}.png`);
+      await page.screenshot({ path: framePath, type: 'png', omitBackground: alpha, animations: 'disabled' });
+    }
+    fs.copyFileSync(path.join(frameDir, '000000.png'), pngPath);
+    const args = [
+      '-y', '-framerate', String(fps), '-i', path.join(frameDir, '%06d.png'),
+      '-frames:v', String(framesCount), '-an'
+    ];
+    if (alpha) {
+      args.push('-c:v', 'qtrle', '-pix_fmt', 'argb', '-movflags', '+faststart', mp4Path);
+    } else {
+      args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', mp4Path);
+    }
+    execFileSync('ffmpeg', args, { stdio: 'pipe', timeout: 30 * 60 * 1000, maxBuffer: 32 * 1024 * 1024 });
+    if (!fs.existsSync(mp4Path) || fs.statSync(mp4Path).size < 1024) {
+      throw new Error('FFmpeg n’a pas produit de séquence animée exploitable.');
+    }
+    return {
+      pngPath,
+      pngUrl: `/storage/components/${safeName}.png`,
+      mp4Path,
+      mp4Url: `/storage/components/${safeName}.${ext}`,
+      framesCount,
+      sizeBytes: fs.statSync(mp4Path).size
+    };
+  } finally {
+    if (browser) await browser.close().catch(() => undefined);
+    fs.rmSync(frameDir, { recursive: true, force: true });
   }
-
-  const stat = fs.existsSync(mp4Path) ? fs.statSync(mp4Path) : { size: 1024 };
-
-  return {
-    pngPath,
-    pngUrl: `/storage/components/${componentName}.png`,
-    mp4Path,
-    mp4Url: `/renders/component_${componentName}.mp4`,
-    framesCount,
-    sizeBytes: stat.size
-  };
 }
 
-// -------------------------------------------------------------
 // COMPLETE TIMELINE COMPOSITION PIPELINE WITH FFMPEG
 // (Supports: clips, layout split, motion overlays, libass subtitles, SFX/audio mixing)
 // -------------------------------------------------------------
