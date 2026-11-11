@@ -153,36 +153,58 @@ export default function App() {
   // Video File Import Handler
   const handleImportVideoFile = async (file: File) => {
     try {
-      const blobUrl = URL.createObjectURL(file);
+      const allowed = ['video/mp4', 'video/quicktime', 'video/webm', 'application/octet-stream'];
+      if (file.size === 0 || file.size > 250 * 1024 * 1024) {
+        throw new Error('Fichier vide ou supérieur à 250 Mo.');
+      }
+      if (file.type && !allowed.includes(file.type)) {
+        throw new Error('Format non pris en charge. Utilisez MP4, MOV ou WebM.');
+      }
+
+      const response = await fetch('/api/studio/videos/upload', {
+        method: 'POST',
+        headers: {
+          'Content-Type': file.type || 'application/octet-stream',
+          'X-File-Name': encodeURIComponent(file.name)
+        },
+        body: file
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.video) {
+        throw new Error(payload.error || 'Import serveur échoué.');
+      }
+
+      const uploaded = payload.video as SourceVideo;
+      const previewUrl = URL.createObjectURL(file);
       const newVid: SourceVideo = {
-        id: `vid-${Date.now()}`,
-        name: file.name,
-        duration: 45,
-        resolution: '1080x1920',
-        sizeMb: Math.round(file.size / (1024 * 1024)) || 12,
-        recordedAt: new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }),
-        url: blobUrl,
+        ...uploaded,
+        url: previewUrl,
         category: 'Shorts'
       };
+      setSourceVideos(prev => [newVid, ...prev.filter(v => v.name !== uploaded.name)]);
 
-      // Register with server
-      await fetch('/api/studio/videos', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newVid)
-      }).catch(() => {});
-
-      setSourceVideos(prev => [newVid, ...prev]);
       if (selectedProject) {
+        const update = await fetch(`/api/studio/projects/${selectedProject.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sourceVideoName: uploaded.name,
+            speakerVideoUrl: uploaded.url,
+            duration: uploaded.duration
+          })
+        });
+        if (!update.ok) throw new Error('La vidéo a été importée, mais son association au projet a échoué.');
         setSelectedProject({
           ...selectedProject,
-          sourceVideoName: file.name,
-          speakerVideoUrl: blobUrl
+          sourceVideoName: uploaded.name,
+          speakerVideoUrl: previewUrl,
+          duration: uploaded.duration
         });
       }
-      showToast(`Vidéo "${file.name}" importée comme rush principal !`);
+      showToast(`Vidéo "${uploaded.name}" importée et vérifiée par FFprobe.`);
     } catch (err) {
-      showToast('Erreur lors de l\'import de la vidéo');
+      const message = err instanceof Error ? err.message : 'Erreur lors de l’import de la vidéo.';
+      showToast(message);
     }
   };
 
@@ -193,7 +215,7 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         if (data.projects && data.projects.length > 0) {
-          const firstProj = { ...data.projects[0], feedbacks: defaultFeedbacks };
+          const firstProj = data.projects[0];
           setProjects(data.projects);
           setSelectedProject(firstProj);
         }
