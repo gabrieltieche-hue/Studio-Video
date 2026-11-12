@@ -3,7 +3,7 @@ import path from 'path';
 import { lookup } from 'dns/promises';
 import { isIP } from 'net';
 import { execFileSync, spawn, spawnSync } from 'child_process';
-import { chromium } from 'playwright';
+import { chromium, type Route } from 'playwright';
 import {
   TAKES_DIR,
   RENDERS_DIR,
@@ -583,7 +583,7 @@ export async function captureMotionComponentAsset(
       viewport: { width, height },
       deviceScaleFactor: 1
     });
-    await page.route('**/*', route => {
+    await page.route('**/*', (route: Route) => {
       const requestUrl = route.request().url();
       if (requestUrl.startsWith('data:') || requestUrl.startsWith('blob:') || requestUrl.startsWith('about:')) return route.continue();
       return route.abort();
