@@ -4,10 +4,10 @@ Le dépôt contient une interface React, un serveur Express, les API de projets/
 
 ## Une seule commande
 
-Dans Termux, entre dans Ubuntu avec `config`, puis colle :
+Dans Termux, entre dans Ubuntu avec `config`. Si un ancien Studio tourne encore, arrête-le avec Ctrl+C. Puis télécharge le lanceur dans un vrai fichier et exécute-le (ne pas utiliser `bash <(curl ...)`, car certains environnements Termux/proot n'ont pas `/dev/fd`) :
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/gabrieltieche-hue/Studio-Video/production-hardening/scripts/start-studio-online.sh)
+curl -fL --retry 3 "https://raw.githubusercontent.com/gabrieltieche-hue/Studio-Video/production-hardening/scripts/start-studio-online.sh" -o ~/start-studio-online.sh && chmod +x ~/start-studio-online.sh && bash ~/start-studio-online.sh
 ```
 
 Le script :
@@ -18,7 +18,7 @@ Le script :
 - démarre le serveur en mode production sur le port 3000 ;
 - ouvre un lien HTTPS temporaire `trycloudflare.com`.
 
-Ouvre le lien HTTPS affiché. À la première requête, le navigateur demandera la clé affichée dans le terminal. Ne partage pas cette clé. Les API et fichiers vidéo sont protégés ; l'URL seule ne suffit pas à les consulter.
+Ouvre le lien HTTPS affiché. À la première requête API, le navigateur demandera la clé d'accès. Le lanceur ne l'affiche plus dans son journal et la renouvelle à chaque démarrage. Dans un second terminal Ubuntu, exécute localement `cat ~/Studio-Video/.studio-api-key`, puis copie la valeur directement dans la fenêtre d'authentification du navigateur. Ne colle jamais cette valeur dans ChatGPT, GitHub ou un message partagé. Les API et fichiers vidéo sont protégés ; l'URL seule ne suffit pas à les consulter.
 
 Garde le terminal ouvert : fermer Termux, tuer le processus ou redémarrer la tablette arrête le serveur et le tunnel. À chaque nouveau démarrage, Cloudflare génère une nouvelle URL.
 
