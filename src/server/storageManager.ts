@@ -30,7 +30,9 @@ export interface FeedbackItem {
   id: string;
   timestamp: number;
   timeFormatted: string;
+  quoteText?: string;
   text: string;
+  type?: 'comment' | 'cut' | 'idea';
   author: string;
   resolved: boolean;
   targetElement?: string;
