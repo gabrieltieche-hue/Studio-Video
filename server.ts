@@ -1750,8 +1750,12 @@ app.post('/api/studio/projects/:id/versions', async (req: Request, res: Response
 });
 
 app.post('/api/studio/projects', async (req: Request, res: Response) => {
-  const result = await executeToolCall('create_short_project', req.body);
-  return res.json(result);
+  try {
+    const result = await executeToolCall('create_short_project', req.body);
+    return res.status(201).json(result);
+  } catch (error: any) {
+    return res.status(400).json({ error: error.message || 'Création du projet impossible.' });
+  }
 });
 
 app.put('/api/studio/projects/:id', (req: Request, res: Response) => {
@@ -1868,17 +1872,24 @@ app.post('/api/studio/projects/:id/feedbacks', (req: Request, res: Response) => 
   const proj = getProject(req.params.id);
   if (!proj) return res.status(404).json({ error: 'Projet introuvable' });
 
-  const { timestamp, timeFormatted, text, targetElement, drawingSnapshot } = req.body;
+  const { timestamp, timeFormatted, quoteText, text, targetElement, drawingSnapshot, type } = req.body;
+  if (typeof text !== 'string' || !text.trim() || text.length > 3000) {
+    return res.status(400).json({ error: 'Le commentaire doit contenir entre 1 et 3000 caractères.' });
+  }
+  const normalizedType = ['comment', 'cut', 'idea'].includes(type) ? type : 'comment';
+  const safeTimestamp = Number(timestamp);
   const newFeedback: FeedbackItem = {
-    id: `fb-${Date.now()}`,
-    timestamp: timestamp || 0,
-    timeFormatted: timeFormatted || '00:00.00',
-    text: text || '',
-    author: 'Melvyn',
+    id: `fb-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`,
+    timestamp: Number.isFinite(safeTimestamp) && safeTimestamp >= 0 ? safeTimestamp : 0,
+    timeFormatted: typeof timeFormatted === 'string' ? timeFormatted.slice(0, 20) : '00:00.00',
+    quoteText: typeof quoteText === 'string' ? quoteText.slice(0, 500) : undefined,
+    text: text.trim(),
+    author: 'Utilisateur',
     resolved: false,
-    targetElement,
-    drawingSnapshot,
-    createdAt: new Date().toISOString().replace('T', ' ').slice(0, 16)
+    targetElement: typeof targetElement === 'string' ? targetElement.slice(0, 300) : undefined,
+    drawingSnapshot: typeof drawingSnapshot === 'string' && drawingSnapshot.length <= 2_000_000 ? drawingSnapshot : undefined,
+    createdAt: new Date().toISOString(),
+    type: normalizedType
   };
 
   if (!proj.feedbacks) proj.feedbacks = [];
