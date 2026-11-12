@@ -66,9 +66,9 @@ if ! command -v cloudflared >/dev/null 2>&1; then
 fi
 
 KEY_FILE="$APP_DIR/.studio-api-key"
-if [[ ! -s "$KEY_FILE" ]]; then
-  (umask 077; openssl rand -hex 32 > "$KEY_FILE") || die "Impossible de générer la clé d'accès. Vérifie qu'OpenSSL est installé."
-fi
+# Rotate the local bearer secret on each fresh launch. This invalidates any key
+# that may have appeared in a shared terminal log or conversation.
+(umask 077; openssl rand -hex 32 > "$KEY_FILE") || die "Impossible de générer la clé d'accès. Vérifie qu'OpenSSL est installé."
 STUDIO_API_KEY="$(cat "$KEY_FILE")"
 chmod 600 "$KEY_FILE"
 
@@ -125,8 +125,10 @@ done
 say "Serveur local opérationnel."
 say "Interface locale: $LOCAL_URL"
 say "La clé d'accès sera demandée à la première ouverture du studio."
-say "Clé locale (à saisir dans la fenêtre du navigateur; ne la partage pas):"
-printf '%s\n' "$STUDIO_API_KEY"
+say "Nouvelle clé d'accès générée; l'ancienne est invalidée."
+say "Pour la saisir dans le navigateur, lis-la localement dans un second terminal avec :"
+printf 'cat %q\n' "$KEY_FILE"
+say "Ne colle jamais cette clé dans ChatGPT, GitHub ou un message partagé."
 say "Ouverture du tunnel HTTPS temporaire. Copie l'adresse trycloudflare.com affichée ci-dessous."
 say "Garde ce terminal ouvert. Ctrl+C arrête le serveur et le lien public."
 say "Whisper: $([[ -n "$WHISPER_CLI_PATH" && -n "$WHISPER_MODEL_PATH" ]] && echo 'binaire et modèle détectés' || echo "non configuré dans cet environnement; le studio s'ouvrira, mais la transcription sera indisponible")"
