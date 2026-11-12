@@ -100,7 +100,7 @@ export STORAGE_DIR="${STORAGE_DIR:-$APP_DIR/storage}"
 [[ -n "$WHISPER_CLI_PATH" ]] && export WHISPER_CLI_PATH
 [[ -n "$WHISPER_MODEL_PATH" ]] && export WHISPER_MODEL_PATH
 
-npm start > "$APP_DIR/studio-server.log" 2>&1 &
+"$APP_DIR/node_modules/.bin/tsx" "$APP_DIR/server.ts" > "$APP_DIR/studio-server.log" 2>&1 &
 SERVER_PID=$!
 printf '%s\n' "$SERVER_PID" > "$APP_DIR/studio-server.pid"
 
