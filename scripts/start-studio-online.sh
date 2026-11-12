@@ -10,7 +10,7 @@ LOCAL_URL="http://127.0.0.1:${PORT}"
 say() { printf '\n[Video Agent Studio] %s\n' "$*"; }
 die() { printf '\nERREUR: %s\n' "$*" >&2; exit 1; }
 
-for cmd in git curl tar; do
+for cmd in git curl tar openssl find; do
   command -v "$cmd" >/dev/null 2>&1 || die "Commande manquante: $cmd"
 done
 command -v node >/dev/null 2>&1 || die "Node.js n'est pas installé dans cet environnement Ubuntu. Dans Termux, installe nodejs-lts puis relance depuis Ubuntu."
@@ -129,6 +129,6 @@ say "Clé locale (à saisir dans la fenêtre du navigateur; ne la partage pas):"
 printf '%s\n' "$STUDIO_API_KEY"
 say "Ouverture du tunnel HTTPS temporaire. Copie l'adresse trycloudflare.com affichée ci-dessous."
 say "Garde ce terminal ouvert. Ctrl+C arrête le serveur et le lien public."
-say "Whisper: $([[ -n "$WHISPER_CLI_PATH" && -n "$WHISPER_MODEL_PATH" ]] && echo 'binaire et modèle détectés' || echo 'non configuré dans cet environnement; le studio s'ouvrira, mais la transcription sera indisponible')"
+say "Whisper: $([[ -n "$WHISPER_CLI_PATH" && -n "$WHISPER_MODEL_PATH" ]] && echo 'binaire et modèle détectés' || echo "non configuré dans cet environnement; le studio s'ouvrira, mais la transcription sera indisponible")"
 
 cloudflared tunnel --no-autoupdate --url "$LOCAL_URL"
