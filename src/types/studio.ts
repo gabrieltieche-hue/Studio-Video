@@ -38,7 +38,7 @@ export interface MotionComponent {
 export interface RenderVersion {
   version: string;
   createdAt: string;
-  status: 'done' | 'current' | 'failed' | 'rendering';
+  status: 'draft' | 'done' | 'current' | 'failed' | 'rendering';
   duration: number;
   fps: number;
   notes: string;
@@ -105,6 +105,14 @@ export interface ShortProject {
   fps: number;
   resolution: { width: number; height: number };
   sourceVideoName?: string;
+  preparedVideoName?: string;
+  editSpec?: Record<string, unknown>;
+  silenceAnalysis?: {
+    totalSilencesRemoved: number;
+    originalDuration: number;
+    adjustedDuration: number;
+    speechSegments: Array<{ start: number; end: number }>;
+  };
   speakerVideoUrl?: string;
   audioTrackUrl?: string;
   currentVersion: string;

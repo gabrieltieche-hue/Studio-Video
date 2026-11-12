@@ -2,6 +2,9 @@ import express, { Request, Response } from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'fs';
+import { timingSafeEqual } from 'crypto';
+import { spawnSync } from 'child_process';
+import { chromium } from 'playwright';
 import { fileURLToPath } from 'url';
 import {
   initStorage,
@@ -30,6 +33,7 @@ import {
   downloadRemoteVideo,
   startRenderShort,
   detectAndRemoveSilences,
+  prepareShortMedia,
   extractAudioAndTranscribe,
   captureMotionComponentAsset,
   getJob,
@@ -48,13 +52,52 @@ initStorage();
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
-// Global CORS Middleware for ChatGPT Actions and MCP clients
+// CORS is permissive only for local development. Production origins must be explicitly configured.
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean);
+const production = process.env.NODE_ENV === 'production';
+
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
+  const origin = req.headers.origin;
+  if (!production) {
+    res.header('Access-Control-Allow-Origin', '*');
+  } else if (origin && allowedOrigins.includes(origin)) {
+    res.header('Access-Control-Allow-Origin', origin);
+    res.header('Vary', 'Origin');
+  }
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-File-Name');
+  res.header('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
+app.get('/healthz', (_req, res) => res.json({ status: 'ok' }));
+
+// Public schema/health endpoints are safe to inspect. All media and project data,
+// REST mutations and MCP calls require a bearer key in production.
+app.use((req, res, next) => {
+  const publicPaths = new Set(['/healthz', '/openapi.json', '/api/openapi.json', '/.well-known/openapi.json']);
+  const protectedPath = req.path.startsWith('/api/') || req.path === '/mcp' ||
+    req.path === '/sse' || req.path.startsWith('/mcp/') ||
+    req.path.startsWith('/takes/') || req.path.startsWith('/renders/') ||
+    req.path.startsWith('/storage/');
+  if (!production || !protectedPath || publicPaths.has(req.path)) return next();
+
+  const expected = process.env.STUDIO_API_KEY || '';
+  if (expected.length < 32) {
+    return res.status(503).json({ error: 'Production access is disabled: configure STUDIO_API_KEY (at least 32 characters) in the secret manager.' });
+  }
+  const authorization = req.header('authorization') || '';
+  const bearer = authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
+  const cookie = (req.headers.cookie || '').split(';').map(item => item.trim()).find(item => item.startsWith('studio_session='));
+  const candidate = bearer || (cookie ? decodeURIComponent(cookie.slice('studio_session='.length)) : '');
+  const left = Buffer.from(candidate);
+  const right = Buffer.from(expected);
+  if (left.length !== right.length || !timingSafeEqual(left, right)) {
+    return res.status(401).json({ error: 'Authentification requise. Fournissez la clé Video Agent Studio.' });
+  }
+  if (bearer && !cookie) {
+    res.setHeader('Set-Cookie', `studio_session=${encodeURIComponent(expected)}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=43200`);
   }
   next();
 });
@@ -133,311 +176,7 @@ window.setT = function(t) {
   }
 };
 
-const sampleProjects: ShortProject[] = [
-  {
-    id: 'proj-1',
-    slug: 'short-monteur-ia-claude',
-    title: 'Short 01 — Comment l\'IA révolutionne le montage vidéo',
-    mode: 'split_screen_clips',
-    platform: 'instagram',
-    status: 'ready',
-    duration: 55.4,
-    fps: 30,
-    resolution: { width: 1080, height: 1920 },
-    sourceVideoName: 'interview-melvyn-ia-take04.mp4',
-    speakerVideoUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=800&q=80',
-    currentVersion: 'v2',
-    versions: [
-      { version: 'v1', createdAt: '2026-11-08 14:20', status: 'done', duration: 58.2, fps: 30, notes: 'Version brute initiale avec Whisper' },
-      { version: 'v2', createdAt: '2026-11-09 09:45', status: 'current', duration: 55.4, fps: 30, notes: 'Silences coupés (-2.8s), CTA DM Instagram ajouté, animation de sablier remplacée' },
-      { version: 'v3', createdAt: '2026-11-09 11:10', status: 'rendering', duration: 55.4, fps: 60, notes: 'Export 60fps et retouche de colorimétrie' }
-    ],
-    transcript: [
-      { id: 'w1', word: 'Aujourd\'hui', start: 0.1, end: 0.5, confidence: 0.98 },
-      { id: 'w2', word: 'tout', start: 0.52, end: 0.75, confidence: 0.99 },
-      { id: 'w3', word: 'le', start: 0.76, end: 0.88, confidence: 0.99 },
-      { id: 'w4', word: 'monde', start: 0.89, end: 1.25, confidence: 0.98 },
-      { id: 'w5', word: 'pense', start: 1.3, end: 1.65, confidence: 0.97 },
-      { id: 'w6', word: 'que', start: 1.66, end: 1.82, confidence: 0.99 },
-      { id: 'w7', word: 'le', start: 1.83, end: 1.95, confidence: 0.99 },
-      { id: 'w8', word: 'montage', start: 1.96, end: 2.45, confidence: 0.98 },
-      { id: 'w9', word: 'vidéo', start: 2.48, end: 2.85, confidence: 0.99 },
-      { id: 'w10', word: 'prend', start: 2.9, end: 3.2, confidence: 0.97 },
-      { id: 'w11', word: 'des', start: 3.22, end: 3.4, confidence: 0.98 },
-      { id: 'w12', word: 'heures.', start: 3.42, end: 3.9, confidence: 0.98 },
-      { id: 'w13', word: 'Mais', start: 4.1, end: 4.35, confidence: 0.99 },
-      { id: 'w14', word: 'regarde', start: 4.38, end: 4.75, confidence: 0.98 },
-      { id: 'w15', word: 'ce', start: 4.78, end: 4.95, confidence: 0.99 },
-      { id: 'w16', word: 'moteur', start: 4.98, end: 5.42, confidence: 0.98 },
-      { id: 'w17', word: 'propriétaire', start: 5.45, end: 6.1, confidence: 0.96 },
-      { id: 'w18', word: 'codé', start: 6.15, end: 6.45, confidence: 0.98 },
-      { id: 'w19', word: 'en', start: 6.48, end: 6.6, confidence: 0.99 },
-      { id: 'w20', word: 'WebCodecs', start: 6.62, end: 7.3, confidence: 0.95 },
-      { id: 'w21', word: 'et', start: 7.35, end: 7.48, confidence: 0.99 },
-      { id: 'w22', word: 'Playwright.', start: 7.5, end: 8.2, confidence: 0.94 },
-      { id: 'w23', word: 'On', start: 8.4, end: 8.6, confidence: 0.99 },
-      { id: 'w24', word: 'rend', start: 8.62, end: 8.88, confidence: 0.98 },
-      { id: 'w25', word: 'une', start: 8.9, end: 9.05, confidence: 0.99 },
-      { id: 'w26', word: 'minute', start: 9.08, end: 9.45, confidence: 0.98 },
-      { id: 'w27', word: 'en', start: 9.48, end: 9.62, confidence: 0.99 },
-      { id: 'w28', word: '8.5', start: 9.65, end: 10.2, confidence: 0.99 },
-      { id: 'w29', word: 'secondes', start: 10.22, end: 10.8, confidence: 0.98 },
-      { id: 'w30', word: 'à', start: 10.85, end: 10.98, confidence: 0.99 },
-      { id: 'w31', word: 'près', start: 11.0, end: 11.25, confidence: 0.98 },
-      { id: 'w32', word: 'de', start: 11.26, end: 11.38, confidence: 0.99 },
-      { id: 'w33', word: '200', start: 11.4, end: 11.85, confidence: 0.98 },
-      { id: 'w34', word: 'images', start: 11.88, end: 12.35, confidence: 0.98 },
-      { id: 'w35', word: 'par', start: 12.38, end: 12.55, confidence: 0.99 },
-      { id: 'w36', word: 'seconde !', start: 12.58, end: 13.2, confidence: 0.97 },
-      { id: 'w37', word: 'Voici', start: 13.5, end: 13.85, confidence: 0.98 },
-      { id: 'w38', word: 'exactement', start: 13.88, end: 14.5, confidence: 0.97 },
-      { id: 'w39', word: 'comment', start: 14.52, end: 14.88, confidence: 0.99 },
-      { id: 'w40', word: 'l\'IA', start: 14.9, end: 15.25, confidence: 0.98 },
-      { id: 'w41', word: 'Claude', start: 15.28, end: 15.65, confidence: 0.98 },
-      { id: 'w42', word: 'et', start: 15.68, end: 15.8, confidence: 0.99 },
-      { id: 'w43', word: 'ChatGPT', start: 15.82, end: 16.4, confidence: 0.98 },
-      { id: 'w44', word: 'interagissent.', start: 16.42, end: 17.2, confidence: 0.97 },
-      { id: 'w45', word: 'ChatGPT', start: 17.4, end: 17.9, confidence: 0.99 },
-      { id: 'w46', word: 'assure', start: 17.95, end: 18.3, confidence: 0.98 },
-      { id: 'w47', word: 'la', start: 18.32, end: 18.45, confidence: 0.99 },
-      { id: 'w48', word: 'direction', start: 18.48, end: 19.1, confidence: 0.98 },
-      { id: 'w49', word: 'artistique,', start: 19.15, end: 19.8, confidence: 0.97 },
-      { id: 'w50', word: 'écrit', start: 20.0, end: 20.35, confidence: 0.98 },
-      { id: 'w51', word: 'les', start: 20.38, end: 20.5, confidence: 0.99 },
-      { id: 'w52', word: 'scripts', start: 20.52, end: 21.1, confidence: 0.98 },
-      { id: 'w53', word: 'et', start: 21.15, end: 21.3, confidence: 0.99 },
-      { id: 'w54', word: 'génère', start: 21.35, end: 21.85, confidence: 0.97 },
-      { id: 'w55', word: 'les', start: 21.88, end: 22.0, confidence: 0.99 },
-      { id: 'w56', word: 'animations.', start: 22.05, end: 22.8, confidence: 0.98 },
-      { id: 'w57', word: 'Le', start: 23.0, end: 23.2, confidence: 0.99 },
-      { id: 'w58', word: 'moteur', start: 23.22, end: 23.65, confidence: 0.98 },
-      { id: 'w59', word: 'local', start: 23.68, end: 24.15, confidence: 0.97 },
-      { id: 'w60', word: 'exécute', start: 24.2, end: 24.75, confidence: 0.98 },
-      { id: 'w61', word: 'le', start: 24.78, end: 24.9, confidence: 0.99 },
-      { id: 'w62', word: 'montage,', start: 24.92, end: 25.5, confidence: 0.98 },
-      { id: 'w63', word: 'synchronise', start: 25.6, end: 26.3, confidence: 0.97 },
-      { id: 'w64', word: 'Whisper', start: 26.35, end: 26.9, confidence: 0.98 },
-      { id: 'w65', word: 'et', start: 26.95, end: 27.1, confidence: 0.99 },
-      { id: 'w66', word: 'produit', start: 27.15, end: 27.6, confidence: 0.98 },
-      { id: 'w67', word: 'les', start: 27.62, end: 27.75, confidence: 0.99 },
-      { id: 'w68', word: 'rendus.', start: 27.78, end: 28.4, confidence: 0.98 },
-      { id: 'w69', word: 'Tu', start: 28.7, end: 28.9, confidence: 0.99 },
-      { id: 'w70', word: 'peux', start: 28.92, end: 29.2, confidence: 0.98 },
-      { id: 'w71', word: 'dessiner', start: 29.25, end: 29.8, confidence: 0.98 },
-      { id: 'w72', word: 'sur', start: 29.85, end: 30.05, confidence: 0.99 },
-      { id: 'w73', word: 'chaque', start: 30.1, end: 30.45, confidence: 0.98 },
-      { id: 'w74', word: 'image', start: 30.48, end: 30.9, confidence: 0.97 },
-      { id: 'w75', word: 'ou', start: 30.95, end: 31.1, confidence: 0.99 },
-      { id: 'w76', word: 'inspecter', start: 31.15, end: 31.8, confidence: 0.98 },
-      { id: 'w77', word: 'n\'importe', start: 31.85, end: 32.3, confidence: 0.97 },
-      { id: 'w78', word: 'quel', start: 32.32, end: 32.5, confidence: 0.99 },
-      { id: 'w79', word: 'calque.', start: 32.52, end: 33.1, confidence: 0.98 },
-      { id: 'w80', word: 'L\'IA', start: 33.4, end: 33.7, confidence: 0.99 },
-      { id: 'w81', word: 'reçoit', start: 33.75, end: 34.2, confidence: 0.98 },
-      { id: 'w82', word: 'tes', start: 34.22, end: 34.4, confidence: 0.99 },
-      { id: 'w83', word: 'retours', start: 34.45, end: 35.0, confidence: 0.98 },
-      { id: 'w84', word: 'horodatés', start: 35.05, end: 35.8, confidence: 0.97 },
-      { id: 'w85', word: 'et', start: 35.85, end: 36.0, confidence: 0.99 },
-      { id: 'w86', word: 'corrige', start: 36.05, end: 36.55, confidence: 0.98 },
-      { id: 'w87', word: 'le', start: 36.58, end: 36.7, confidence: 0.99 },
-      { id: 'w88', word: 'code', start: 36.72, end: 37.15, confidence: 0.98 },
-      { id: 'w89', word: 'en', start: 37.18, end: 37.35, confidence: 0.99 },
-      { id: 'w90', word: 'direct.', start: 37.38, end: 38.0, confidence: 0.98 },
-      { id: 'w91', word: 'Plus', start: 38.4, end: 38.75, confidence: 0.98 },
-      { id: 'w92', word: 'besoin', start: 38.78, end: 39.2, confidence: 0.99 },
-      { id: 'w93', word: 'de', start: 39.22, end: 39.38, confidence: 0.99 },
-      { id: 'w94', word: 'passer', start: 39.4, end: 39.85, confidence: 0.98 },
-      { id: 'w95', word: 'des', start: 39.88, end: 40.05, confidence: 0.99 },
-      { id: 'w96', word: 'journées', start: 40.1, end: 40.7, confidence: 0.98 },
-      { id: 'w97', word: 'entières', start: 40.75, end: 41.35, confidence: 0.97 },
-      { id: 'w98', word: 'sur', start: 41.4, end: 41.6, confidence: 0.99 },
-      { id: 'w99', word: 'Premiere', start: 41.65, end: 42.25, confidence: 0.98 },
-      { id: 'w100', word: 'ou', start: 42.28, end: 42.45, confidence: 0.99 },
-      { id: 'w101', word: 'CapCut.', start: 42.5, end: 43.1, confidence: 0.98 },
-      { id: 'w102', word: 'Chaque', start: 43.4, end: 43.8, confidence: 0.98 },
-      { id: 'w103', word: 'semaine,', start: 43.85, end: 44.45, confidence: 0.97 },
-      { id: 'w104', word: 'des', start: 44.5, end: 44.68, confidence: 0.99 },
-      { id: 'w105', word: 'dizaines', start: 44.7, end: 45.2, confidence: 0.98 },
-      { id: 'w106', word: 'de', start: 45.22, end: 45.38, confidence: 0.99 },
-      { id: 'w107', word: 'Shorts', start: 45.4, end: 46.0, confidence: 0.98 },
-      { id: 'w108', word: 'sont', start: 46.05, end: 46.3, confidence: 0.99 },
-      { id: 'w109', word: 'créés', start: 46.35, end: 46.85, confidence: 0.98 },
-      { id: 'w110', word: 'et', start: 46.9, end: 47.05, confidence: 0.99 },
-      { id: 'w111', word: 'validés', start: 47.1, end: 47.7, confidence: 0.98 },
-      { id: 'w112', word: 'en', start: 47.75, end: 47.95, confidence: 0.99 },
-      { id: 'w113', word: 'quelques', start: 48.0, end: 48.5, confidence: 0.98 },
-      { id: 'w114', word: 'clics.', start: 48.55, end: 49.1, confidence: 0.98 },
-      { id: 'w115', word: 'Connecte', start: 49.4, end: 50.0, confidence: 0.98 },
-      { id: 'w116', word: 'ton', start: 50.05, end: 50.25, confidence: 0.99 },
-      { id: 'w117', word: 'ChatGPT', start: 50.3, end: 50.95, confidence: 0.98 },
-      { id: 'w118', word: 'dès', start: 51.0, end: 51.25, confidence: 0.99 },
-      { id: 'w119', word: 'maintenant', start: 51.3, end: 52.0, confidence: 0.98 },
-      { id: 'w120', word: 'et', start: 52.05, end: 52.2, confidence: 0.99 },
-      { id: 'w121', word: 'lance', start: 52.25, end: 52.75, confidence: 0.98 },
-      { id: 'w122', word: 'ton', start: 52.8, end: 53.0, confidence: 0.99 },
-      { id: 'w123', word: 'premier', start: 53.05, end: 53.65, confidence: 0.98 },
-      { id: 'w124', word: 'rendu', start: 53.7, end: 54.2, confidence: 0.98 },
-      { id: 'w125', word: 'vidéo !', start: 54.25, end: 55.4, confidence: 0.97 }
-    ],
-    motionTrack: [
-      { id: 'm1', componentId: 'comp-chart', name: 'Courbe Vitesse 200 FPS', start: 0.5, end: 8.5, type: 'chart' },
-      { id: 'm2', componentId: 'comp-rocket', name: 'Fusée Accélération x10', start: 8.6, end: 18.0, type: 'rocket' },
-      { id: 'm3', componentId: 'comp-neural', name: 'Synapses IA & Whisper', start: 18.2, end: 32.0, type: 'network' },
-      { id: 'm4', componentId: 'comp-chart', name: 'Comparatif Remotion vs WebCodecs', start: 32.2, end: 45.0, type: 'card' },
-      { id: 'm5', componentId: 'comp-rocket', name: 'CTA Final Instagram DM', start: 45.2, end: 55.4, type: 'typography' }
-    ],
-    layoutTrack: [
-      { id: 'l1', layout: 'split', start: 0, end: 18.0 },
-      { id: 'l2', layout: 'fullscreen', start: 18.0, end: 28.5 },
-      { id: 'l3', layout: 'split', start: 28.5, end: 45.0 },
-      { id: 'l4', layout: 'facecam', start: 45.0, end: 55.4 }
-    ],
-    sfxTrack: [
-      { id: 's1', sound: 'whoosh', start: 0.4, volume: 0.8 },
-      { id: 's2', sound: 'pop', start: 4.8, volume: 0.7 },
-      { id: 's3', sound: 'click', start: 8.5, volume: 0.6 },
-      { id: 's4', sound: 'thump', start: 18.1, volume: 0.9 },
-      { id: 's5', sound: 'ding', start: 45.0, volume: 0.85 }
-    ],
-    musicTrack: {
-      trackName: 'code-noir-phonk-remix.mp3',
-      volume: 0.18,
-      ducking: true
-    },
-    feedbacks: [
-      {
-        id: 'fb-1',
-        timestamp: 1.38,
-        timeFormatted: '00:01.38',
-        text: 'Le sablier est totalement infâme, remplace-le par une animation de compteur dynamique qui grimpe à 200 FPS.',
-        author: 'Melvyn',
-        resolved: true,
-        targetElement: 'MotionOverlay > #hourglass-asset',
-        createdAt: '2026-11-09 09:12'
-      },
-      {
-        id: 'fb-2',
-        timestamp: 8.52,
-        timeFormatted: '00:08.52',
-        text: 'Agrandis la typographie du mot "8.5 SECONDES" de 25% et passe la en couleur orange électrique.',
-        author: 'Melvyn',
-        resolved: false,
-        targetElement: 'Caption > .highlight-word[data-word="8.5"]',
-        drawingSnapshot: 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="300" height="200"><rect width="100%" height="100%" fill="%231a1a1a"/><circle cx="150" cy="100" r="50" stroke="%23ff6600" stroke-width="4" fill="none"/><text x="150" y="105" fill="%23fff" font-size="12" text-anchor="middle">ZOOM +25%</text></svg>',
-        createdAt: '2026-11-09 10:04'
-      },
-      {
-        id: 'fb-3',
-        timestamp: 15.20,
-        timeFormatted: '00:15.20',
-        text: 'Le split-screen coupe légèrement le menton de l\'intervenant, recadre la facecam 4% plus bas.',
-        author: 'Melvyn',
-        resolved: false,
-        targetElement: 'LayoutSplitScreen > FacecamWrapper',
-        createdAt: '2026-11-09 10:45'
-      }
-    ],
-    motionComponents: initialMotionComponents,
-    contactSheet: Array.from({ length: 12 }, (_, i) => {
-      const ts = (i / 11) * 55.4;
-      return {
-        frameIndex: i + 1,
-        timestamp: Number(ts.toFixed(2)),
-        timeFormatted: `00:${ts < 10 ? '0' : ''}${ts.toFixed(1)}s`,
-        title: [
-          'Hook Accroche (0-1.5s)',
-          'Statistique Moteur (4s)',
-          'Barres Dynamiques (8.5s)',
-          'Transition Whoosh (13s)',
-          'Synapses Neurales (18s)',
-          'Plein Écran Motion (23s)',
-          'Zoom Données (28s)',
-          'Retour Split-Screen (33s)',
-          'Graphique Boursier (38s)',
-          'Comparatif Rendu (42s)',
-          'Appel à l\'action DM (48s)',
-          'Outro & Logo (54s)'
-        ][i] || `Frame #${i + 1}`,
-        qcCheck: i === 1 ? 'revise' : 'pass',
-        notes: i === 1 ? 'Sous-titre à grossir' : 'Conforme aux règles des 1.5s'
-      };
-    }),
-    styleProfile: {
-      name: 'Melvyn Dark High-Contrast Orange',
-      fontFamily: 'Inter, Montserrat, sans-serif',
-      accentColor: '#FF6B00',
-      textColor: '#FFFFFF',
-      cardBg: '#18181B',
-      captionsPosition: 'center_divider',
-      visualBeatsTarget: 22
-    }
-  },
-  {
-    id: 'proj-2',
-    slug: 'short-moteur-vs-remotion',
-    title: 'Short 02 — Pourquoi Remotion est 12x plus lent que WebCodecs',
-    mode: 'faceless_explainer',
-    platform: 'tiktok',
-    status: 'ready',
-    duration: 44.2,
-    fps: 30,
-    resolution: { width: 1080, height: 1920 },
-    currentVersion: 'v1',
-    versions: [
-      { version: 'v1', createdAt: '2026-11-09 10:15', status: 'current', duration: 44.2, fps: 30, notes: 'Faceless 100% animé avec voix off et motion Canvas' }
-    ],
-    transcript: [
-      { id: 'w101', word: '106', start: 0.1, end: 0.5, confidence: 0.99 },
-      { id: 'w102', word: 'secondes', start: 0.52, end: 0.95, confidence: 0.99 },
-      { id: 'w103', word: 'pour', start: 0.98, end: 1.15, confidence: 0.99 },
-      { id: 'w104', word: 'rendre', start: 1.18, end: 1.45, confidence: 0.98 },
-      { id: 'w105', word: 'une', start: 1.48, end: 1.6, confidence: 0.99 },
-      { id: 'w106', word: 'vidéo ?', start: 1.62, end: 2.1, confidence: 0.99 },
-      { id: 'w107', word: 'C\'est', start: 2.3, end: 2.5, confidence: 0.99 },
-      { id: 'w108', word: 'inacceptable.', start: 2.52, end: 3.2, confidence: 0.98 }
-    ],
-    motionTrack: [
-      { id: 'm101', componentId: 'comp-chart', name: 'Comparaison Chrono', start: 0, end: 15, type: 'chart' },
-      { id: 'm102', componentId: 'comp-rocket', name: 'WebCodecs GPU Turbo', start: 15.1, end: 30, type: 'rocket' },
-      { id: 'm103', componentId: 'comp-neural', name: 'Pipeline Headless Chrome', start: 30.1, end: 44.2, type: 'network' }
-    ],
-    layoutTrack: [
-      { id: 'l101', layout: 'fullscreen', start: 0, end: 44.2 }
-    ],
-    sfxTrack: [
-      { id: 's101', sound: 'whoosh', start: 0.2, volume: 0.8 },
-      { id: 's102', sound: 'click', start: 2.5, volume: 0.7 }
-    ],
-    musicTrack: {
-      trackName: 'cyberpunk-dark-bass.mp3',
-      volume: 0.22,
-      ducking: true
-    },
-    feedbacks: [],
-    motionComponents: initialMotionComponents,
-    contactSheet: Array.from({ length: 12 }, (_, i) => ({
-      frameIndex: i + 1,
-      timestamp: Number(((i / 11) * 44.2).toFixed(2)),
-      timeFormatted: `00:${((i / 11) * 44.2).toFixed(1)}s`,
-      title: `Beat Visuel #${i + 1}`,
-      qcCheck: 'pass',
-      notes: 'Faceless 100% motion dynamique'
-    })),
-    styleProfile: {
-      name: 'Cyber Kinetic',
-      fontFamily: 'Space Grotesk, sans-serif',
-      accentColor: '#00F0FF',
-      textColor: '#FFFFFF',
-      cardBg: '#090D16',
-      captionsPosition: 'bottom',
-      visualBeatsTarget: 24
-    }
-  }
-];
-// Seed default projects to persistent disk storage if not already initialized
-if (getAllProjects().length === 0) {
-  sampleProjects.forEach(p => saveProject(p));
-}
+// Production starts with an empty project library. No demo projects or media are seeded.
 
 // -------------------------------------------------------------
 // MCP TOOL DEFINITIONS (The 15 Commands from the documentation)
@@ -603,12 +342,13 @@ const MCP_TOOLS = [
   },
   {
     name: 'make_reference_contact_sheet',
-    description: 'Extraire une planche de 12 images représentatives pour le contrôle qualité (QC)',
+    description: 'Extraire une planche de 12 images d’un rendu réel pour le contrôle qualité. Choisir draft ou final.',
     inputSchema: {
       type: 'object',
       properties: {
         project_id: { type: 'string', description: 'ID ou slug du projet' },
-        version: { type: 'string', default: 'current' }
+        version: { type: 'string', default: 'current' },
+        quality: { type: 'string', enum: ['draft', 'final'], default: 'draft' }
       },
       required: ['project_id']
     }
@@ -734,25 +474,54 @@ async function executeToolCall(toolName: string, args: any) {
     case 'studio_status': {
       const projects = getAllProjects();
       const takes = getAvailableTakes();
+      const checkBinary = (binary: string) => {
+        try {
+          const result = spawnSync(binary, ['-version'], { encoding: 'utf-8', timeout: 5000 });
+          return result.status === 0;
+        } catch { return false; }
+      };
+      const modelPath = process.env.WHISPER_MODEL_PATH || '';
+      const whisperModelPresent = Boolean(modelPath && fs.existsSync(modelPath));
+      const pendingJobs = fs.existsSync(path.join(STORAGE_DIR, 'jobs'))
+        ? fs.readdirSync(path.join(STORAGE_DIR, 'jobs')).filter(file => file.endsWith('.json')).length
+        : 0;
       return {
         status: 'online',
         serverTime: new Date().toISOString(),
-        engine: {
-          name: 'VideoAgentStudio Real FFmpeg Engine (x86_64 / H.264)',
-          renderFps: '~198.4 fps',
-          averageRenderTime: '8.5s pour 60s',
-          backend: 'Real FFmpeg 4.4.2 native encoder + WebCodecs pipeline',
-          ffmpeg: 'FFmpeg 4.4.2 with libx264, libmp3lame, libopus (active)',
-          whisper: 'Whisper mot-à-mot synchronisé avec timecodes précis',
-          diskStorage: 'Persistance réelle sur disque dans /storage/ (takes, projects, versions, renders)'
+        runtime: {
+          node: process.version,
+          platform: process.platform,
+          architecture: process.arch,
+          environment: process.env.NODE_ENV || 'development'
         },
-        projectsCount: projects.length,
-        availableTakes: takes.length,
+        engine: {
+          ffmpeg: checkBinary('ffmpeg'),
+          ffprobe: checkBinary('ffprobe'),
+          chromium: (() => {
+            try { return fs.existsSync(process.env.CHROME_PATH || chromium.executablePath()); } catch { return false; }
+          })(),
+          whisperCli: checkBinary(process.env.WHISPER_CLI_PATH || 'whisper-cli'),
+          whisperModel: whisperModelPresent,
+          modelPathConfigured: Boolean(modelPath),
+          motionCapture: true
+        },
+        counts: {
+          projects: projects.length,
+          sourceVideos: takes.length,
+          renderJobs: pendingJobs
+        },
         storage: {
-          takesDirectory: 'storage/takes',
-          rendersDirectory: 'storage/renders',
-          projectsDirectory: 'storage/projects'
-        }
+          root: STORAGE_DIR,
+          takes: TAKES_DIR,
+          renders: RENDERS_DIR,
+          projects: PROJECTS_DIR,
+          persistentMountConfigured: STORAGE_DIR !== path.resolve(__dirname, 'storage')
+        },
+        limitations: [
+          'Audio mixing, music and SFX tracks require explicit assets and are not yet included in every render configuration.',
+          'Cloud object persistence is only durable after a private Cloud Storage bucket is mounted and STORAGE_DIR points to it.',
+          'Authentication must be configured with STUDIO_API_KEY in production.'
+        ]
       };
     }
 
@@ -776,116 +545,104 @@ async function executeToolCall(toolName: string, args: any) {
 
     case 'upload_source_video': {
       const filename = args.filename || `rush-${Date.now()}.mp4`;
-      let vid: SourceVideo;
       if (args.video_data_base64 || args.base64) {
-        vid = saveUploadedVideo(filename, args.video_data_base64 || args.base64);
-      } else if (args.video_url) {
-        vid = await downloadRemoteVideo(args.video_url, filename);
-      } else {
-        const takes = getAvailableTakes();
-        vid = takes[0] || {
-          id: `take-${Date.now()}`,
-          name: filename,
-          duration: 30,
-          resolution: '1080x1920',
-          sizeMb: 5.0,
-          recordedAt: new Date().toISOString().split('T')[0],
-          url: `/takes/${filename}`
-        };
+        const video = saveUploadedVideo(filename, args.video_data_base64 || args.base64);
+        return { success: true, video, message: `Vidéo réellement enregistrée et validée par FFprobe : ${video.name}.` };
       }
-      return {
-        success: true,
-        video: vid,
-        message: `Fichier vidéo "${vid.name}" enregistré avec persistance sur disque dans storage/takes/ et vérifié par FFprobe (${vid.sizeMb} Mo, ${vid.duration}s, ${vid.resolution}).`
-      };
+      if (args.video_url) {
+        const video = await downloadRemoteVideo(args.video_url, filename);
+        return { success: true, video, message: `Vidéo réellement téléchargée et validée par FFprobe : ${video.name}.` };
+      }
+      throw new Error('Import non effectué : fournissez video_data_base64 ou video_url. Aucun fichier fictif ne sera créé.');
     }
 
     case 'create_short_project': {
-      const dur = Number(args.duration) || 45.0;
-      const scriptText = args.script || args.title || 'Voici un nouveau short monté automatiquement par l\'agent IA avec sous-titres dynamiques et synchronisation Whisper mot par mot.';
-      const words = scriptText.trim().split(/\s+/).filter(Boolean);
-      const totalWords = words.length;
-
-      const generatedTranscript: WhisperWord[] = words.map((w: string, idx: number) => {
-        const start = Number(((idx / totalWords) * dur * 0.95).toFixed(2));
-        const end = Number((((idx + 0.9) / totalWords) * dur * 0.95).toFixed(2));
-        return {
-          id: `w-${idx + 1}`,
-          word: w,
-          start,
-          end,
-          confidence: 0.98
-        };
-      });
-
+      const mode = args.mode || 'split_screen_clips';
+      if (!['faceless_explainer', 'split_screen_clips'].includes(mode)) throw new Error('Mode de production invalide.');
+      const slug = String(args.slug || `short-${Date.now()}`);
+      if (!/^[a-z0-9][a-z0-9-]{1,48}$/.test(slug)) throw new Error('Slug invalide (minuscules, chiffres et tirets, 2 à 49 caractères).');
+      if (getProject(slug)) throw new Error(`Un projet avec le slug "${slug}" existe déjà.`);
       const takes = getAvailableTakes();
-      const defaultSource = takes[0]?.name || 'take-melvyn-01.mp4';
+      const source = args.source_video ? takes.find(video => video.name === args.source_video) : undefined;
+      if (args.source_video && !source) throw new Error(`Vidéo source introuvable dans takes/: ${args.source_video}`);
+      if (mode === 'split_screen_clips' && !source) {
+        throw new Error('Le mode split-screen nécessite un rush réel présent dans takes/. Importez le fichier avant de créer le projet.');
+      }
 
+      const duration = Number(args.duration) || source?.duration || 45;
+      if (!Number.isFinite(duration) || duration < 1 || duration > 180) throw new Error('Durée de projet invalide (1 à 180 secondes).');
+      const fps = Number(args.fps) || 30;
+      const now = new Date().toISOString();
       const newProj: ShortProject = {
-        id: `proj-${Date.now()}`,
-        slug: args.slug || `short-${Date.now()}`,
-        title: args.title || 'Nouveau Short IA',
-        mode: args.mode || 'split_screen_clips',
+        id: `proj-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+        slug,
+        title: String(args.title || 'Nouveau Short').slice(0, 160),
+        mode,
         platform: args.platform || 'instagram',
-        status: 'ready',
-        duration: dur,
-        fps: args.fps || 30,
+        status: 'draft',
+        duration,
+        fps,
         resolution: { width: 1080, height: 1920 },
-        sourceVideoName: args.source_video || args.filename || defaultSource,
-        speakerVideoUrl: args.speaker_video_url || args.source_video_url || `/takes/${defaultSource}`,
+        ...(source ? { sourceVideoName: source.name, speakerVideoUrl: source.url } : {}),
         currentVersion: 'v1',
-        versions: [
-          {
-            version: 'v1',
-            createdAt: new Date().toISOString().replace('T', ' ').slice(0, 16),
-            status: 'current',
-            duration: dur,
-            fps: args.fps || 30,
-            notes: 'Projet créé via ChatGPT / Interface'
-          }
-        ],
-        transcript: generatedTranscript,
-        motionTrack: [
-          { id: 'm1', componentId: 'comp-chart', name: 'Intro Données', start: 0, end: Math.min(10, dur / 3), type: 'chart' },
-          { id: 'm2', componentId: 'comp-rocket', name: 'Animation Clé', start: Math.min(10.1, dur / 3), end: Math.min(25, (dur * 2) / 3), type: 'rocket' },
-          { id: 'm3', componentId: 'comp-neural', name: 'Réseau Final', start: Math.min(25.1, (dur * 2) / 3), end: dur, type: 'network' }
-        ],
-        layoutTrack: [
-          { id: 'l1', layout: args.mode === 'split_screen_clips' ? 'split' : 'fullscreen', start: 0, end: dur }
-        ],
-        sfxTrack: [
-          { id: 's1', sound: 'whoosh', start: 0.2, volume: 0.8 },
-          { id: 's2', sound: 'pop', start: Math.min(5, dur / 4), volume: 0.7 },
-          { id: 's3', sound: 'click', start: Math.min(15, dur / 2), volume: 0.7 }
-        ],
-        musicTrack: { trackName: 'ambient-tech.mp3', volume: 0.15, ducking: true },
+        versions: [{
+          version: 'v1',
+          createdAt: now,
+          status: 'draft',
+          duration,
+          fps,
+          notes: 'Projet initialisé. Aucun rendu ni transcription n’a encore été produit.'
+        }],
+        transcript: [],
+        motionTrack: [],
+        layoutTrack: [{ id: 'layout-main', layout: mode === 'split_screen_clips' ? 'split' : 'fullscreen', start: 0, end: duration }],
+        sfxTrack: [],
+        musicTrack: { trackName: '', volume: 0.15, ducking: true },
         feedbacks: [],
-        motionComponents: { ...initialMotionComponents },
-        contactSheet: Array.from({ length: 12 }, (_, i) => ({
-          frameIndex: i + 1,
-          timestamp: Number(((i / 11) * dur).toFixed(2)),
-          timeFormatted: `00:${((i / 11) * dur).toFixed(1)}s`,
-          title: `Frame #${i + 1}`,
-          qcCheck: 'pass',
-          notes: 'Plan vérifié'
-        })),
+        motionComponents: {},
+        contactSheet: [],
         styleProfile: {
-          name: 'Default Clean VF',
+          name: 'Default Editorial',
           fontFamily: 'Inter, sans-serif',
           accentColor: '#FF6B00',
-          textColor: '#FFFFFF',
-          cardBg: '#18181B',
+          textColor: '#171717',
+          cardBg: '#FFFFFF',
           captionsPosition: 'center_divider',
           visualBeatsTarget: 20
         }
       };
-
       saveProject(newProj);
       return {
         success: true,
         projectId: newProj.id,
         project: newProj,
-        message: `Projet "${newProj.title}" créé et persisté sur disque dans storage/projects/${newProj.id}/project.json.`
+        message: `Projet "${newProj.title}" créé en brouillon. La transcription et les rendus restent à produire.`
+      };
+    }
+
+    case 'transcribe_short': {
+      const proj = getProject(args.project_id);
+      if (!proj) throw new Error(`Projet "${args.project_id}" introuvable.`);
+      const sourceName = proj.preparedVideoName || proj.sourceVideoName;
+      if (!sourceName) throw new Error('Aucune vidéo source n’est associée au projet.');
+      const source = getAvailableTakes().find(video => video.name === sourceName);
+      if (!source?.path) throw new Error(`Fichier source absent du stockage: ${sourceName}`);
+      const words = await extractAudioAndTranscribe(proj, source.path, args.language || 'fr');
+      if (!words.length) throw new Error('Whisper n’a retourné aucun mot horodaté.');
+      proj.transcript = words;
+      saveProject(proj);
+      const jobId = `transcribe-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+      const now = new Date().toISOString();
+      saveJob({
+        id: jobId, projectId: proj.id, slug: proj.slug, version: proj.currentVersion,
+        status: 'completed', progress: 100, outputMp4: '', thumbnailUrl: '', contactSheetUrl: '',
+        duration: proj.duration, startedAt: now, completedAt: now,
+        log: `Whisper exécuté sur ${sourceName}: ${words.length} mots horodatés.`
+      });
+      return {
+        jobId, status: 'completed', wordsCount: words.length,
+        language: args.language || 'fr', timingSource: 'whisper.cpp -ml 1',
+        message: `Transcription réellement exécutée par whisper.cpp : ${words.length} mots horodatés.`
       };
     }
 
@@ -918,79 +675,128 @@ async function executeToolCall(toolName: string, args: any) {
     case 'prepare_short': {
       const proj = getProject(args.project_id);
       if (!proj) throw new Error(`Projet "${args.project_id}" introuvable.`);
-      proj.status = 'ready';
+      if (!proj.sourceVideoName) throw new Error('Aucune vidéo source à préparer pour ce projet.');
+      const original = getAvailableTakes().find(video => video.name === proj.sourceVideoName);
+      if (!original?.path) throw new Error(`Vidéo source introuvable: ${proj.sourceVideoName}`);
+      proj.status = 'preparing';
+      const result = prepareShortMedia(proj, original.path);
+      if (result.changed && result.outputName) proj.preparedVideoName = result.outputName;
+      proj.duration = result.adjustedDuration;
+      proj.status = 'draft';
       saveProject(proj);
       return {
         success: true,
         projectId: proj.id,
-        silencesRemovedSeconds: 2.8,
-        adjustedDuration: proj.duration,
-        message: 'Coupes de silences appliquées, voix normalisée et timeline prête sur disque.'
+        sourceVideoName: original.name,
+        preparedVideoName: result.outputName,
+        changed: result.changed,
+        silencesDetected: result.silences.length,
+        silencesRemovedSeconds: result.totalSilencesRemoved,
+        originalDuration: result.originalDuration,
+        adjustedDuration: result.adjustedDuration,
+        speechSegments: result.speechSegments.length,
+        message: result.changed
+          ? `Montage préparatoire FFmpeg réellement créé: ${result.outputName}; ${result.totalSilencesRemoved.toFixed(2)} s de silence supprimées.`
+          : 'Analyse FFmpeg terminée : aucune coupe suffisamment longue à appliquer. Le rush original est conservé.'
       };
     }
 
     case 'save_edit_spec': {
       const proj = getProject(args.project_id);
       if (!proj) throw new Error(`Projet "${args.project_id}" introuvable.`);
-      if (args.edit_spec?.motionTrack) proj.motionTrack = args.edit_spec.motionTrack;
-      if (args.edit_spec?.layoutTrack) proj.layoutTrack = args.edit_spec.layoutTrack;
-      if (args.edit_spec?.sfxTrack) proj.sfxTrack = args.edit_spec.sfxTrack;
+      if (!args.edit_spec || typeof args.edit_spec !== 'object' || Array.isArray(args.edit_spec)) {
+        throw new Error('edit_spec doit être un objet JSON.');
+      }
+      proj.editSpec = args.edit_spec;
+      if (Array.isArray(args.edit_spec.motionTrack)) proj.motionTrack = args.edit_spec.motionTrack;
+      if (Array.isArray(args.edit_spec.layoutTrack)) proj.layoutTrack = args.edit_spec.layoutTrack;
+      if (Array.isArray(args.edit_spec.sfxTrack)) proj.sfxTrack = args.edit_spec.sfxTrack;
       saveProject(proj);
       return {
         success: true,
         projectId: proj.id,
-        message: `Scénario technique de montage sauvegardé sur disque dans storage/projects/${proj.id}/spec.json.`
+        specPath: `storage/projects/${proj.id}/spec.json`,
+        motionItems: proj.motionTrack.length,
+        layoutItems: proj.layoutTrack.length,
+        sfxItems: proj.sfxTrack.length,
+        message: 'Spécification complète du montage enregistrée en JSON.'
       };
     }
 
     case 'write_motion_component': {
-      const id = `comp-${args.component_name.toLowerCase().replace(/[^a-z0-9_-]/g, '-')}`;
+      const componentName = String(args.component_name || '');
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{1,40}$/.test(componentName)) throw new Error('Nom de composant invalide.');
+      const rawCode = String(args.code || '');
+      if (!rawCode.includes('window.setT')) throw new Error('Le composant doit exposer window.setT(t).');
+      const html = /<html[\s>]|<!doctype/i.test(rawCode)
+        ? rawCode
+        : `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}*{box-sizing:border-box}</style></head><body>${rawCode.includes('<body') ? rawCode : ''}<script>${rawCode.includes('<body') ? '' : rawCode}</script></body></html>`;
+      const id = `comp-${componentName.toLowerCase().replace(/[^a-z0-9_-]/g, '-')}`;
       const comp: MotionComponent = {
-        id,
-        name: args.component_name,
-        code: args.code,
-        description: args.description || 'Composant d\'animation personnalisé',
-        tRange: [0, 1],
-        width: 1080,
-        height: 1080,
-        fps: 30,
+        id, name: componentName, code: html,
+        description: args.description || 'Composant d’animation personnalisé',
+        tRange: [0, 1], width: 1080, height: 1920, fps: 30,
         hasAlpha: args.has_alpha ?? true
       };
-
-      if (!fs.existsSync(COMPONENTS_DIR)) fs.mkdirSync(COMPONENTS_DIR, { recursive: true });
-      fs.writeFileSync(path.join(COMPONENTS_DIR, `${args.component_name}.html`), args.code, 'utf-8');
-
+      fs.mkdirSync(COMPONENTS_DIR, { recursive: true });
+      fs.writeFileSync(path.join(COMPONENTS_DIR, `${componentName}.html`), html, 'utf-8');
       const all = getAllProjects();
-      all.forEach(p => {
-        p.motionComponents[id] = comp;
-        saveProject(p);
+      all.forEach(project => {
+        project.motionComponents[id] = comp;
+        saveProject(project);
       });
-
       return {
-        success: true,
-        componentId: id,
-        name: comp.name,
-        message: `Composant d'animation "${comp.name}" enregistré sur disque dans storage/components/${args.component_name}.html avec fonction window.setT(t).`
+        success: true, componentId: id, name: comp.name,
+        htmlPath: `storage/components/${componentName}.html`,
+        message: `Composant HTML enregistré. La capture réelle doit encore être exécutée avec capture_motion_component.`
       };
     }
 
     case 'capture_motion_component': {
+      const name = String(args.component_name || '');
+      const duration = Number(args.duration) || 5;
+      const fps = Number(args.fps) || 30;
+      const resolution = args.resolution === '540x960' ? '540x960' : '1080x1920';
+      const alpha = args.has_alpha !== false;
+      const asset = await captureMotionComponentAsset(name, duration, fps, resolution, alpha);
+      if (!fs.existsSync(asset.mp4Path) || asset.sizeBytes < 1024) {
+        throw new Error('La capture a échoué : aucun clip vidéo valide n’a été produit.');
+      }
       return {
         success: true,
-        component: args.component_name,
-        framesCount: Math.round((args.duration || 5) * (args.fps || 30)),
-        videoAssetUrl: `/renders/component_${args.component_name}.mp4`,
-        message: `Séquence de ${args.duration || 5}s capturée à ${args.fps || 30}fps avec canal alpha.`
+        component: name,
+        framesCount: asset.framesCount,
+        videoAssetUrl: asset.mp4Url,
+        previewUrl: asset.pngUrl,
+        sizeBytes: asset.sizeBytes,
+        message: `Capture Chromium réelle: ${asset.framesCount} images rendues via window.setT(t), puis encodées par FFmpeg.`
       };
     }
 
     case 'render_short': {
       const proj = getProject(args.project_id);
       if (!proj) throw new Error(`Projet "${args.project_id}" introuvable.`);
+      const activeDraft = (proj.versions || []).find(version => version.version === proj.currentVersion && version.status === 'draft');
       const nextNum = (proj.versions || []).length + 1;
-      const nextV = args.version || `v${nextNum}`;
+      const nextV = args.version || activeDraft?.version || `v${nextNum}`;
 
-      // Start REAL FFmpeg render process
+      // Capture each actual timeline component before FFmpeg starts.
+      const splitLayout = proj.mode === 'split_screen_clips' &&
+        (proj.layoutTrack || []).some(item => item.layout === 'split');
+      for (const item of proj.motionTrack || []) {
+        const component = proj.motionComponents?.[item.componentId];
+        if (!component) throw new Error(`Composant manquant pour la piste de mouvement: ${item.componentId}`);
+        const duration = Math.max(0.5, Math.min(20, Number(item.end) - Number(item.start)));
+        await captureMotionComponentAsset(
+          component.name,
+          duration,
+          Math.min(30, component.fps || 30),
+          splitLayout ? '1080x960' : '1080x1920',
+          Boolean(component.hasAlpha)
+        );
+      }
+
+      // Start FFmpeg only after source/spec/motion inputs have been checked.
       const job = startRenderShort(proj, nextV, { quality: args.quality, fps: args.fps });
 
       return {
@@ -1010,40 +816,50 @@ async function executeToolCall(toolName: string, args: any) {
 
     case 'job_status': {
       const job = getJob(args.job_id);
-      if (!job) {
-        return {
-          id: args.job_id,
-          status: 'completed',
-          progress: 100,
-          message: 'Tâche terminée'
-        };
-      }
+      if (!job) throw new Error(`Tâche inconnue: ${args.job_id}`);
       return job;
     }
 
     case 'get_short_outputs': {
       const proj = getProject(args.project_id);
       if (!proj) throw new Error(`Projet "${args.project_id}" introuvable.`);
-      const ver = args.version || proj.currentVersion;
-      const mp4Name = `${proj.slug}_${ver}.mp4`;
-      const mp4Path = path.join(RENDERS_DIR, mp4Name);
-      const exists = fs.existsSync(mp4Path);
-      const sizeMb = exists ? Number((fs.statSync(mp4Path).size / (1024 * 1024)).toFixed(2)) : 0;
-
+      const version = String(args.version || proj.currentVersion);
+      if (!/^[a-z0-9][a-z0-9-]{0,20}$/.test(version)) throw new Error('Identifiant de version invalide.');
+      const finalName = `${proj.slug}_${version}.mp4`;
+      const draftName = `${proj.slug}_${version}_draft.mp4`;
+      const finalPath = path.join(RENDERS_DIR, finalName);
+      const draftPath = path.join(RENDERS_DIR, draftName);
+      const exists = fs.existsSync(finalPath) && fs.statSync(finalPath).size >= 1024;
+      const draftExists = fs.existsSync(draftPath) && fs.statSync(draftPath).size >= 1024;
+      if (!exists && !draftExists) {
+        throw new Error(`Aucun MP4 réel trouvé pour ${version}. Lancez d’abord render_short.`);
+      }
+      const selectedPath = exists ? finalPath : draftPath;
+      const metadata = probeVideo(selectedPath);
+      const thumbName = exists ? `${proj.slug}_${version}_thumb.jpg` : `${proj.slug}_${version}_draft_thumb.jpg`;
+      const contactName = exists ? `${proj.slug}_${version}_contact.jpg` : `${proj.slug}_${version}_draft_contact.jpg`;
+      const thumbExists = fs.existsSync(path.join(RENDERS_DIR, thumbName));
+      const contactExists = fs.existsSync(path.join(RENDERS_DIR, contactName));
       return {
         projectId: proj.id,
         slug: proj.slug,
-        version: ver,
+        version,
+        status: exists ? 'final' : 'draft-only',
         files: {
-          mp4: `/renders/${mp4Name}`,
-          thumbnail: `/renders/${proj.slug}_${ver}_thumb.jpg`,
-          contactSheet: `/renders/${proj.slug}_${ver}_contact.jpg`
+          mp4: exists ? `/renders/${finalName}` : null,
+          draftMp4: draftExists ? `/renders/${draftName}` : null,
+          thumbnail: thumbExists ? `/renders/${thumbName}` : null,
+          contactSheet: contactExists ? `/renders/${contactName}` : null,
+          subtitlesSrt: fs.existsSync(path.join(PROJECTS_DIR, proj.id, 'subtitles.srt')) ? `/storage/projects/${proj.id}/subtitles.srt` : null
         },
         metadata: {
-          existsOnDisk: exists,
-          sizeMb,
-          duration: proj.duration,
-          resolution: '1080x1920'
+          existsOnDisk: true,
+          sizeMb: Number((fs.statSync(selectedPath).size / (1024 * 1024)).toFixed(2)),
+          duration: metadata.duration,
+          resolution: metadata.resolution,
+          fps: metadata.fps,
+          codec: metadata.codec,
+          hasAudio: metadata.hasAudio
         }
       };
     }
@@ -1051,21 +867,28 @@ async function executeToolCall(toolName: string, args: any) {
     case 'make_reference_contact_sheet': {
       const proj = getProject(args.project_id);
       if (!proj) throw new Error(`Projet "${args.project_id}" introuvable.`);
-      const ver = proj.currentVersion;
-      const mp4Path = path.join(RENDERS_DIR, `${proj.slug}_${ver}.mp4`);
-      const contactPath = path.join(RENDERS_DIR, `${proj.slug}_${ver}_contact.jpg`);
-
-      if (fs.existsSync(mp4Path)) {
-        generateContactSheet(mp4Path, contactPath, proj.duration);
+      const version = args.version && args.version !== 'current' ? String(args.version) : proj.currentVersion;
+      if (!/^v[0-9]{1,3}$/.test(version)) throw new Error('Identifiant de version invalide.');
+      const quality = args.quality === 'final' ? 'final' : 'draft';
+      const renderTag = quality === 'draft' ? `${version}_draft` : version;
+      const mp4Path = path.join(RENDERS_DIR, `${proj.slug}_${renderTag}.mp4`);
+      if (!fs.existsSync(mp4Path) || fs.statSync(mp4Path).size < 1024) {
+        throw new Error(`Le MP4 ${renderTag} n’existe pas. Impossible de créer une planche de contact.`);
       }
-
+      const outputPath = path.join(RENDERS_DIR, `${proj.slug}_${renderTag}_contact.jpg`);
+      const ok = generateContactSheet(mp4Path, outputPath, probeVideo(mp4Path).duration);
+      if (!ok || !fs.existsSync(outputPath) || fs.statSync(outputPath).size < 1024) {
+        throw new Error('FFmpeg n’a pas produit de planche de contact exploitable.');
+      }
       return {
         success: true,
         projectId: proj.id,
-        version: ver,
-        contactSheetUrl: `/renders/${proj.slug}_${ver}_contact.jpg`,
-        qcPassed: true,
-        message: 'Planche de contact 12 images extraite avec FFmpeg et vérifiée conforme.'
+        version,
+        quality,
+        contactSheetUrl: `/renders/${path.basename(outputPath)}`,
+        outputBytes: fs.statSync(outputPath).size,
+        qcPassed: false,
+        message: `Planche de contact réelle du rendu ${quality}. Inspection visuelle requise; la création de la planche ne valide pas le QC.`
       };
     }
 
@@ -1093,7 +916,9 @@ async function executeToolCall(toolName: string, args: any) {
           feedbacksCount: (p.feedbacks || []).length,
           openFeedbacksCount: (p.feedbacks || []).filter(f => !f.resolved).length,
           versionsCount: (p.versions || []).length,
-          studioUrl: `https://ais-pre-eacgacwlcnlnaupvxvzucq-79011270395.europe-west2.run.app/?project=${p.id}`
+          studioUrl: process.env.PUBLIC_APP_URL
+            ? `${process.env.PUBLIC_APP_URL.replace(/\/$/, '')}/?project=${encodeURIComponent(p.id)}`
+            : null
         }))
       };
     }
@@ -1110,16 +935,20 @@ async function executeToolCall(toolName: string, args: any) {
     case 'get_studio_url': {
       const proj = getProject(args.project_id);
       if (!proj) throw new Error(`Projet "${args.project_id}" introuvable.`);
-      const cloudUrl = `https://ais-pre-eacgacwlcnlnaupvxvzucq-79011270395.europe-west2.run.app/?project=${proj.id}`;
-      const localUrl = `http://localhost:3000/?project=${proj.id}`;
+      const baseUrl = (process.env.PUBLIC_APP_URL || process.env.APP_URL || '').replace(/\/$/, '');
+      const projectPath = `/?project=${encodeURIComponent(proj.id)}`;
+      const cloudUrl = baseUrl ? `${baseUrl}${projectPath}` : null;
       return {
         projectId: proj.id,
         slug: proj.slug,
         title: proj.title,
         currentVersion: proj.currentVersion,
         cloudUrl,
-        localUrl,
-        shareableMessage: `Lien d'inspection directe dans Video Agent Studio : ${cloudUrl}`
+        relativeUrl: projectPath,
+        needsPublicBaseUrl: !baseUrl,
+        shareableMessage: cloudUrl
+          ? `Lien d'inspection directe dans Video Agent Studio : ${cloudUrl}`
+          : 'PUBLIC_APP_URL doit être configurée dans Cloud Run avant de générer un lien public fiable.'
       };
     }
 
@@ -1172,27 +1001,29 @@ async function executeToolCall(toolName: string, args: any) {
       const proj = getProject(args.project_id);
       if (!proj) throw new Error(`Projet "${args.project_id}" introuvable.`);
       const nextNum = (proj.versions || []).length + 1;
-      const versionStr = args.version || `v${nextNum}`;
-      proj.versions.forEach(v => {
-        if (v.status === 'current') v.status = 'done';
-      });
+      const versionStr = String(args.version || `v${nextNum}`);
+      if (!/^v[0-9]{1,3}$/.test(versionStr)) throw new Error('Le nom de version doit être v1, v2, v3…');
+      if ((proj.versions || []).some(item => item.version === versionStr)) {
+        throw new Error(`La version "${versionStr}" existe déjà. Aucun fichier ne sera écrasé.`);
+      }
       const newVersion = {
         version: versionStr,
-        createdAt: new Date().toISOString().replace('T', ' ').slice(0, 16),
-        status: 'current' as const,
+        createdAt: new Date().toISOString(),
+        status: 'draft' as const,
         duration: Number(args.duration) || proj.duration,
         fps: Number(args.fps) || proj.fps,
-        notes: args.notes || `Version ${versionStr} créée suite aux retours de montage.`
+        notes: String(args.notes || `Brouillon ${versionStr}; en attente de rendu et de QC.`)
       };
       proj.versions.unshift(newVersion);
       proj.currentVersion = versionStr;
+      proj.status = 'draft';
       saveProject(proj);
       return {
         success: true,
         projectId: proj.id,
         currentVersion: versionStr,
         versions: proj.versions,
-        message: `Nouvelle version "${versionStr}" créée et sauvegardée sur disque.`
+        message: `Version brouillon "${versionStr}" créée sans modifier les fichiers des versions précédentes. Lancez render_short pour produire le MP4.`
       };
     }
 
@@ -1919,8 +1750,12 @@ app.post('/api/studio/projects/:id/versions', async (req: Request, res: Response
 });
 
 app.post('/api/studio/projects', async (req: Request, res: Response) => {
-  const result = await executeToolCall('create_short_project', req.body);
-  return res.json(result);
+  try {
+    const result = await executeToolCall('create_short_project', req.body);
+    return res.status(201).json(result);
+  } catch (error: any) {
+    return res.status(400).json({ error: error.message || 'Création du projet impossible.' });
+  }
 });
 
 app.put('/api/studio/projects/:id', (req: Request, res: Response) => {
@@ -1945,8 +1780,30 @@ app.delete('/api/studio/projects/:id', (req: Request, res: Response) => {
   return res.json({ success: true, message: 'Projet supprimé du disque' });
 });
 
+app.post('/api/studio/videos/upload',
+  express.raw({ type: ['video/mp4', 'video/quicktime', 'video/webm', 'application/octet-stream'], limit: '250mb' }),
+  async (req: Request, res: Response) => {
+    try {
+      if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+        return res.status(400).json({ error: 'Corps vidéo vide ou Content-Type non pris en charge.' });
+      }
+      const rawName = req.header('x-file-name') || 'upload.mp4';
+      let filename = rawName;
+      try { filename = decodeURIComponent(rawName); } catch { /* validated by saveUploadedVideo */ }
+      const video = saveUploadedVideo(filename, req.body);
+      return res.status(201).json({ success: true, video });
+    } catch (error: any) {
+      return res.status(400).json({ error: error.message || 'Import vidéo échoué.' });
+    }
+  }
+);
+
 app.post('/api/studio/videos', async (req: Request, res: Response) => {
-  return res.json(await executeToolCall('upload_source_video', req.body));
+  try {
+    return res.json(await executeToolCall('upload_source_video', req.body));
+  } catch (error: any) {
+    return res.status(400).json({ error: error.message || 'Import vidéo échoué.' });
+  }
 });
 
 app.post('/api/studio/projects/:id/transcribe', async (req: Request, res: Response) => {
@@ -2015,17 +1872,24 @@ app.post('/api/studio/projects/:id/feedbacks', (req: Request, res: Response) => 
   const proj = getProject(req.params.id);
   if (!proj) return res.status(404).json({ error: 'Projet introuvable' });
 
-  const { timestamp, timeFormatted, text, targetElement, drawingSnapshot } = req.body;
+  const { timestamp, timeFormatted, quoteText, text, targetElement, drawingSnapshot, type } = req.body;
+  if (typeof text !== 'string' || !text.trim() || text.length > 3000) {
+    return res.status(400).json({ error: 'Le commentaire doit contenir entre 1 et 3000 caractères.' });
+  }
+  const normalizedType = ['comment', 'cut', 'idea'].includes(type) ? type : 'comment';
+  const safeTimestamp = Number(timestamp);
   const newFeedback: FeedbackItem = {
-    id: `fb-${Date.now()}`,
-    timestamp: timestamp || 0,
-    timeFormatted: timeFormatted || '00:00.00',
-    text: text || '',
-    author: 'Melvyn',
+    id: `fb-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`,
+    timestamp: Number.isFinite(safeTimestamp) && safeTimestamp >= 0 ? safeTimestamp : 0,
+    timeFormatted: typeof timeFormatted === 'string' ? timeFormatted.slice(0, 20) : '00:00.00',
+    quoteText: typeof quoteText === 'string' ? quoteText.slice(0, 500) : undefined,
+    text: text.trim(),
+    author: 'Utilisateur',
     resolved: false,
-    targetElement,
-    drawingSnapshot,
-    createdAt: new Date().toISOString().replace('T', ' ').slice(0, 16)
+    targetElement: typeof targetElement === 'string' ? targetElement.slice(0, 300) : undefined,
+    drawingSnapshot: typeof drawingSnapshot === 'string' && drawingSnapshot.length <= 2_000_000 ? drawingSnapshot : undefined,
+    createdAt: new Date().toISOString(),
+    type: normalizedType
   };
 
   if (!proj.feedbacks) proj.feedbacks = [];

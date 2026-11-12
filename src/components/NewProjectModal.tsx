@@ -17,6 +17,7 @@ interface NewProjectModalProps {
     script: string;
     videoUrl?: string;
     videoFileName?: string;
+    videoFile?: File;
   }) => Promise<void>;
 }
 
@@ -27,12 +28,13 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
 }) => {
   const [title, setTitle] = useState('');
   const [slug, setSlug] = useState('');
-  const [mode, setMode] = useState<'split_screen_clips' | 'faceless_explainer'>('split_screen_clips');
+  const [mode, setMode] = useState<'split_screen_clips' | 'faceless_explainer'>('faceless_explainer');
   const [platform, setPlatform] = useState<'instagram' | 'tiktok' | 'youtube_shorts'>('instagram');
   const [duration, setDuration] = useState(45);
   const [videoSourceType, setVideoSourceType] = useState<'upload' | 'url' | 'sample'>('upload');
   const [videoUrl, setVideoUrl] = useState('');
   const [uploadedFileName, setUploadedFileName] = useState('');
+  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [script, setScript] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -54,20 +56,23 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      const objectUrl = URL.createObjectURL(file);
-      setVideoUrl(objectUrl);
-      setUploadedFileName(file.name);
-      if (!title) {
-        handleTitleChange(file.name.replace(/\.[^/.]+$/, ''));
-      }
-    }
+    if (!file) return;
+    setUploadedFile(file);
+    setUploadedFileName(file.name);
+    setVideoUrl('');
+    if (!title) handleTitleChange(file.name.replace(/\.[^/.]+$/, ''));
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) {
       setError('Veuillez renseigner un titre pour le projet.');
+      return;
+    }
+    const hasUploadedVideo = videoSourceType === 'upload' && Boolean(uploadedFile);
+    const hasRemoteVideo = videoSourceType === 'url' && /^https?:\/\//i.test(videoUrl.trim());
+    if (mode === 'split_screen_clips' && !hasUploadedVideo && !hasRemoteVideo) {
+      setError('Le mode Split-Screen nécessite un vrai rush vidéo. Importez un fichier ou collez une URL publique.');
       return;
     }
 
@@ -82,9 +87,9 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
         mode,
         platform,
         duration,
-        script: script.trim() || `Découvrez comment créer un Short automatisé avec l'agent IA, synchronisé mot à mot avec Whisper.`,
-        videoUrl: videoUrl || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=800&q=80',
-        videoFileName: uploadedFileName || 'rush-personnalise.mp4'
+        script: script.trim(),
+        ...(hasUploadedVideo && uploadedFile ? { videoFile: uploadedFile, videoFileName: uploadedFile.name } : {}),
+        ...(hasRemoteVideo ? { videoUrl: videoUrl.trim(), videoFileName: `${finalSlug}.mp4` } : {})
       });
       onClose();
     } catch (err: any) {
@@ -191,7 +196,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
           {/* Video Source (File upload or URL) */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
-              <label className="text-zinc-300 font-semibold">Vidéo Source (Rush) :</label>
+              <label className="text-zinc-300 font-semibold">Vidéo Source (Rush, obligatoire en Split-Screen) :</label>
               <div className="flex items-center gap-1 bg-zinc-950 p-0.5 rounded border border-zinc-800">
                 <button
                   type="button"
@@ -233,7 +238,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                 type="url"
                 value={videoUrl}
                 onChange={(e) => setVideoUrl(e.target.value)}
-                placeholder="https://.../video.mp4"
+                placeholder="https://exemple.com/ma-video.mp4"
                 className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-2 text-white focus:outline-none focus:border-orange-500"
               />
             )}

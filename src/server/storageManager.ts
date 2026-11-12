@@ -7,13 +7,15 @@ const __dirname = path.dirname(__filename);
 
 // Root storage paths
 export const ROOT_DIR = path.resolve(__dirname, '../../');
-export const STORAGE_DIR = path.resolve(ROOT_DIR, 'storage');
+export const STORAGE_DIR = path.resolve(process.env.STORAGE_DIR || path.join(ROOT_DIR, 'storage'));
 export const TAKES_DIR = path.join(STORAGE_DIR, 'takes');
 export const RENDERS_DIR = path.join(STORAGE_DIR, 'renders');
 export const PROJECTS_DIR = path.join(STORAGE_DIR, 'projects');
 export const COMPONENTS_DIR = path.join(STORAGE_DIR, 'components');
 export const JOBS_DIR = path.join(STORAGE_DIR, 'jobs');
 export const STYLES_DIR = path.join(STORAGE_DIR, 'styles');
+export const MUSIC_DIR = path.join(STORAGE_DIR, 'music');
+export const SFX_DIR = path.join(STORAGE_DIR, 'sfx');
 
 export interface WhisperWord {
   id: string;
@@ -28,7 +30,9 @@ export interface FeedbackItem {
   id: string;
   timestamp: number;
   timeFormatted: string;
+  quoteText?: string;
   text: string;
+  type?: 'comment' | 'cut' | 'idea';
   author: string;
   resolved: boolean;
   targetElement?: string;
@@ -59,13 +63,21 @@ export interface ShortProject {
   fps: number;
   resolution: { width: number; height: number };
   sourceVideoName?: string;
+  preparedVideoName?: string;
+  editSpec?: Record<string, unknown>;
+  silenceAnalysis?: {
+    totalSilencesRemoved: number;
+    originalDuration: number;
+    adjustedDuration: number;
+    speechSegments: Array<{ start: number; end: number }>;
+  };
   speakerVideoUrl?: string;
   audioTrackUrl?: string;
   currentVersion: string;
   versions: Array<{
     version: string;
     createdAt: string;
-    status: 'done' | 'current' | 'failed' | 'rendering';
+    status: 'done' | 'current' | 'failed' | 'rendering' | 'draft';
     duration: number;
     fps: number;
     notes: string;
@@ -132,7 +144,7 @@ export interface SourceVideo {
 
 // Initialize all storage directories
 export function initStorage() {
-  const dirs = [STORAGE_DIR, TAKES_DIR, RENDERS_DIR, PROJECTS_DIR, COMPONENTS_DIR, JOBS_DIR, STYLES_DIR];
+  const dirs = [STORAGE_DIR, TAKES_DIR, RENDERS_DIR, PROJECTS_DIR, COMPONENTS_DIR, JOBS_DIR, STYLES_DIR, MUSIC_DIR, SFX_DIR];
   for (const dir of dirs) {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
@@ -160,6 +172,12 @@ export function saveProject(project: ShortProject) {
   }
   if (project.motionComponents) {
     fs.writeFileSync(path.join(projectDir, 'components.json'), JSON.stringify(project.motionComponents, null, 2), 'utf-8');
+  }
+  if (project.editSpec) {
+    fs.writeFileSync(path.join(projectDir, 'spec.json'), JSON.stringify(project.editSpec, null, 2), 'utf-8');
+  }
+  if (project.silenceAnalysis) {
+    fs.writeFileSync(path.join(projectDir, 'silence-analysis.json'), JSON.stringify(project.silenceAnalysis, null, 2), 'utf-8');
   }
 }
 
@@ -193,6 +211,12 @@ export function getAllProjects(): ShortProject[] {
           if (fs.existsSync(vFile)) {
             p.versions = JSON.parse(fs.readFileSync(vFile, 'utf-8'));
           }
+
+          const specFile = path.join(PROJECTS_DIR, entry.name, 'spec.json');
+          if (fs.existsSync(specFile)) p.editSpec = JSON.parse(fs.readFileSync(specFile, 'utf-8'));
+
+          const silenceFile = path.join(PROJECTS_DIR, entry.name, 'silence-analysis.json');
+          if (fs.existsSync(silenceFile)) p.silenceAnalysis = JSON.parse(fs.readFileSync(silenceFile, 'utf-8'));
 
           const tFile = path.join(PROJECTS_DIR, entry.name, 'transcript.json');
           if (fs.existsSync(tFile)) {

@@ -16,45 +16,28 @@ import { NewProjectModal } from './components/NewProjectModal';
 import { CopyPromptModal } from './components/CopyPromptModal';
 import { ShortProject, SourceVideo, FeedbackItem } from './types/studio';
 
-const defaultFeedbacks: FeedbackItem[] = [
-  {
-    id: 'fb-101',
-    timestamp: 2.15,
-    timeFormatted: '0:02',
-    quoteText: 'mais personne ne veut te dire comment ou',
-    text: 'ici faut montrer des vraies vidéos de créateurs qui disent qu\'ils montent avec claude',
-    resolutionNote: 'Le hook montre maintenant 3 vrais reels de créateurs (iamajene, dryxio, adilet) qui disent monter avec Claude.',
-    author: 'Melvyn',
-    resolved: true,
-    createdAt: 'Oct 27, 02:00 PM',
-    type: 'comment',
-    drawingSnapshot: 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="200" height="120"><rect width="100%" height="100%" fill="%231a1a1a"/><text x="100" y="60" fill="%23ff6600" font-size="12" text-anchor="middle">3 REELS CLAUDE</text></svg>'
-  },
-  {
-    id: 'fb-102',
-    timestamp: 70.0,
-    timeFormatted: '1:10',
-    quoteText: 'Claude. Il va étudier le skill et te',
-    text: 'étape 3 ici en bleu je sais pas c\'est moche ce bleu dégage le bleu avec juste du orange partout s\'il te plaît pour match la da de claude',
-    resolutionNote: 'Plus de bleu nulle part : compteurs, dossiers, boutons et surlignages sont en orange Claude.',
-    author: 'Melvyn',
-    resolved: true,
-    createdAt: 'Oct 27, 02:02 PM',
-    type: 'comment'
-  },
-  {
-    id: 'fb-103',
-    timestamp: 7.43,
-    timeFormatted: '0:07',
-    quoteText: 'pour créer ton propre monteur IA',
-    text: 'ajoute une animation de checklist avec prompts, étapes et outils cochés',
-    resolutionNote: 'Boîte de checklist ajoutée avec les trois badges validés.',
-    author: 'Melvyn',
-    resolved: false,
-    createdAt: 'Oct 27, 02:30 PM',
-    type: 'comment'
+// In production, the API key is entered once per browser tab. The server exchanges
+// the bearer header for an HttpOnly same-origin cookie used by the native video player.
+async function studioFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  const send = (token: string | null) => {
+    const headers = new Headers(init.headers || {});
+    if (token) headers.set('Authorization', `Bearer ${token}`);
+    return fetch(input, { ...init, headers, credentials: 'same-origin' });
+  };
+  let token = sessionStorage.getItem('studio_api_key');
+  let response = await send(token);
+  if (response.status === 401) {
+    const entered = window.prompt('Clé d’accès Video Agent Studio (elle reste dans cet onglet uniquement) :');
+    if (entered && entered.trim().length >= 32) {
+      token = entered.trim();
+      sessionStorage.setItem('studio_api_key', token);
+      response = await send(token);
+    } else {
+      sessionStorage.removeItem('studio_api_key');
+    }
   }
-];
+  return response;
+}
 
 export default function App() {
   const [activeView, setActiveView] = useState<'studio' | 'recorder'>('studio');
@@ -105,27 +88,70 @@ export default function App() {
     script: string;
     videoUrl?: string;
     videoFileName?: string;
+    videoFile?: File;
   }) => {
     try {
-      const res = await fetch('/api/studio/projects', {
+      let sourceVideoName: string | undefined;
+
+      if (data.videoFile) {
+        const upload = await studioFetch('/api/studio/videos/upload', {
+          method: 'POST',
+          headers: {
+            'Content-Type': data.videoFile.type || 'application/octet-stream',
+            'X-File-Name': encodeURIComponent(data.videoFile.name)
+          },
+          body: data.videoFile
+        });
+        const uploadResult = await upload.json();
+        if (!upload.ok || !uploadResult.video?.name) {
+          throw new Error(uploadResult.error || 'Import du rush impossible.');
+        }
+        sourceVideoName = uploadResult.video.name;
+      } else if (data.videoUrl && /^https?:\/\//i.test(data.videoUrl)) {
+        const download = await studioFetch('/api/studio/videos/download', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: data.videoUrl, filename: data.videoFileName || undefined })
+        });
+        const downloadResult = await download.json();
+        if (!download.ok || !downloadResult.video?.name) {
+          throw new Error(downloadResult.error || 'Téléchargement du rush impossible.');
+        }
+        sourceVideoName = downloadResult.video.name;
+      }
+
+      if (data.mode === 'split_screen_clips' && !sourceVideoName) {
+        throw new Error('Le mode Split-Screen nécessite un vrai rush vidéo. Importez un fichier ou indiquez une URL publique.');
+      }
+
+      const res = await studioFetch('/api/studio/projects', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data)
+        body: JSON.stringify({
+          title: data.title,
+          slug: data.slug,
+          mode: data.mode,
+          platform: data.platform,
+          duration: data.duration,
+          script: data.script,
+          source_video: sourceVideoName
+        })
       });
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || 'Erreur lors de la création du projet');
-      }
       const result = await res.json();
+      if (!res.ok || !result.project) {
+        throw new Error(result.error || 'Erreur lors de la création du projet.');
+      }
       const created: ShortProject = {
         ...result.project,
-        feedbacks: []
+        feedbacks: result.project.feedbacks || []
       };
       setProjects(prev => [created, ...prev]);
       setSelectedProject(created);
       setCurrentTime(0);
       setIsPlaying(false);
-      showToast(`Projet "${created.title}" créé avec succès !`);
+      showToast(sourceVideoName
+        ? `Projet "${created.title}" créé avec le rush ${sourceVideoName}.`
+        : `Projet "${created.title}" créé.`);
     } catch (e: any) {
       showToast(e.message || 'Erreur création');
       throw e;
@@ -135,71 +161,96 @@ export default function App() {
   // Delete Project Handler
   const handleDeleteProject = async (id: string) => {
     try {
-      await fetch(`/api/studio/projects/${id}`, { method: 'DELETE' });
-      setProjects(prev => {
-        const updated = prev.filter(p => p.id !== id);
-        if (selectedProject?.id === id && updated.length > 0) {
-          setSelectedProject(updated[0]);
-          setCurrentTime(0);
-        }
-        return updated;
-      });
+      const response = await studioFetch(`/api/studio/projects/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.error || 'Suppression du projet impossible.');
+      }
+      const updated = projects.filter(project => project.id !== id);
+      setProjects(updated);
+      if (selectedProject?.id === id) {
+        setSelectedProject(updated[0] || null);
+        setCurrentTime(0);
+        setIsPlaying(false);
+      }
       showToast('Projet supprimé');
-    } catch (e) {
-      showToast('Erreur suppression projet');
+    } catch (e: any) {
+      showToast(e.message || 'Erreur suppression projet');
     }
   };
 
   // Video File Import Handler
   const handleImportVideoFile = async (file: File) => {
     try {
-      const blobUrl = URL.createObjectURL(file);
+      const allowed = ['video/mp4', 'video/quicktime', 'video/webm', 'application/octet-stream'];
+      if (file.size === 0 || file.size > 250 * 1024 * 1024) {
+        throw new Error('Fichier vide ou supérieur à 250 Mo.');
+      }
+      if (file.type && !allowed.includes(file.type)) {
+        throw new Error('Format non pris en charge. Utilisez MP4, MOV ou WebM.');
+      }
+
+      const response = await studioFetch('/api/studio/videos/upload', {
+        method: 'POST',
+        headers: {
+          'Content-Type': file.type || 'application/octet-stream',
+          'X-File-Name': encodeURIComponent(file.name)
+        },
+        body: file
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.video) {
+        throw new Error(payload.error || 'Import serveur échoué.');
+      }
+
+      const uploaded = payload.video as SourceVideo;
+      const previewUrl = URL.createObjectURL(file);
       const newVid: SourceVideo = {
-        id: `vid-${Date.now()}`,
-        name: file.name,
-        duration: 45,
-        resolution: '1080x1920',
-        sizeMb: Math.round(file.size / (1024 * 1024)) || 12,
-        recordedAt: new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }),
-        url: blobUrl,
+        ...uploaded,
+        url: previewUrl,
         category: 'Shorts'
       };
+      setSourceVideos(prev => [newVid, ...prev.filter(v => v.name !== uploaded.name)]);
 
-      // Register with server
-      await fetch('/api/studio/videos', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newVid)
-      }).catch(() => {});
-
-      setSourceVideos(prev => [newVid, ...prev]);
       if (selectedProject) {
+        const update = await studioFetch(`/api/studio/projects/${selectedProject.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sourceVideoName: uploaded.name,
+            speakerVideoUrl: uploaded.url,
+            duration: uploaded.duration
+          })
+        });
+        if (!update.ok) throw new Error('La vidéo a été importée, mais son association au projet a échoué.');
         setSelectedProject({
           ...selectedProject,
-          sourceVideoName: file.name,
-          speakerVideoUrl: blobUrl
+          sourceVideoName: uploaded.name,
+          speakerVideoUrl: previewUrl,
+          duration: uploaded.duration
         });
       }
-      showToast(`Vidéo "${file.name}" importée comme rush principal !`);
+      showToast(`Vidéo "${uploaded.name}" importée et vérifiée par FFprobe.`);
     } catch (err) {
-      showToast('Erreur lors de l\'import de la vidéo');
+      const message = err instanceof Error ? err.message : 'Erreur lors de l’import de la vidéo.';
+      showToast(message);
     }
   };
 
   // Fetch initial project data from server
   const loadProjects = async () => {
     try {
-      const res = await fetch('/api/studio/projects');
+      const res = await studioFetch('/api/studio/projects');
       if (res.ok) {
         const data = await res.json();
         if (data.projects && data.projects.length > 0) {
-          const firstProj = { ...data.projects[0], feedbacks: defaultFeedbacks };
+          const firstProj = data.projects[0];
           setProjects(data.projects);
           setSelectedProject(firstProj);
         }
       }
 
-      const vidRes = await fetch('/api/studio/videos');
+      const vidRes = await studioFetch('/api/studio/videos');
       if (vidRes.ok) {
         const vidData = await vidRes.json();
         if (vidData.videos) {
@@ -290,17 +341,20 @@ export default function App() {
 
   const handleToggleCutWord = async (wordId: string) => {
     if (!selectedProject) return;
-
-    setSelectedProject(prev => {
-      if (!prev) return prev;
-      return {
+    try {
+      const response = await studioFetch(`/api/studio/projects/${encodeURIComponent(selectedProject.id)}/words/${encodeURIComponent(wordId)}/cut`, {
+        method: 'PATCH'
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.word) throw new Error(payload.error || 'Impossible de modifier ce mot.');
+      setSelectedProject(prev => prev ? ({
         ...prev,
-        transcript: prev.transcript.map(w => 
-          w.id === wordId ? { ...w, isCut: !w.isCut } : w
-        )
-      };
-    });
-    showToast('Mot coupé du montage');
+        transcript: prev.transcript.map(word => word.id === wordId ? payload.word : word)
+      }) : prev);
+      showToast(payload.word.isCut ? 'Mot retiré du montage' : 'Mot rétabli dans le montage');
+    } catch (error: any) {
+      showToast(error.message || 'Échec de la modification du mot');
+    }
   };
 
   const handleAddFeedbackWithSnapshot = async (
@@ -310,54 +364,96 @@ export default function App() {
     snapshot?: string,
     type: 'comment' | 'cut' | 'idea' = 'comment'
   ) => {
-    if (!selectedProject) return;
-
-    const timeFormatted = `00:${time < 10 ? '0' : ''}${time.toFixed(2)}`;
-    const newFb: FeedbackItem = {
-      id: `fb-${Date.now()}`,
-      timestamp: time,
-      timeFormatted,
-      text,
-      quoteText: selectedProject.transcript.find(w => time >= w.start && time <= w.end)?.word,
-      author: 'Melvyn',
-      resolved: false,
-      targetElement,
-      drawingSnapshot: snapshot,
-      createdAt: 'A l\'instant',
-      type
-    };
-
-    setSelectedProject(prev => prev ? ({
-      ...prev,
-      feedbacks: [newFb, ...prev.feedbacks]
-    }) : prev);
-
-    showToast(`Retour ajouté à [${timeFormatted}]`);
+    if (!selectedProject || !text.trim()) return;
+    try {
+      const timeFormatted = `00:${time < 10 ? '0' : ''}${time.toFixed(2)}`;
+      const quoteText = selectedProject.transcript.find(word => time >= word.start && time <= word.end)?.word;
+      const response = await studioFetch(`/api/studio/projects/${encodeURIComponent(selectedProject.id)}/feedbacks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          timestamp: time,
+          timeFormatted,
+          quoteText,
+          text: text.trim(),
+          targetElement,
+          drawingSnapshot: snapshot,
+          type
+        })
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.feedback) throw new Error(payload.error || 'Enregistrement du retour impossible.');
+      setSelectedProject(prev => prev ? ({
+        ...prev,
+        feedbacks: [payload.feedback, ...prev.feedbacks]
+      }) : prev);
+      setProjects(prev => prev.map(project => project.id === selectedProject.id
+        ? { ...project, feedbacks: [payload.feedback, ...project.feedbacks] }
+        : project));
+      showToast(`Retour enregistré à [${timeFormatted}]`);
+    } catch (error: any) {
+      showToast(error.message || 'Erreur lors de l’enregistrement du retour');
+    }
   };
 
-  const handleToggleResolveFeedback = (id: string, currentStatus: boolean) => {
+  const handleToggleResolveFeedback = async (id: string, currentStatus: boolean) => {
     if (!selectedProject) return;
-
-    setSelectedProject(prev => prev ? ({
-      ...prev,
-      feedbacks: prev.feedbacks.map(f => f.id === id ? { ...f, resolved: !currentStatus } : f)
-    }) : prev);
+    try {
+      const response = await studioFetch(`/api/studio/projects/${encodeURIComponent(selectedProject.id)}/feedbacks/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ resolved: !currentStatus })
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || 'Modification du retour impossible.');
+      setSelectedProject(prev => prev ? ({
+        ...prev,
+        feedbacks: prev.feedbacks.map(feedback => feedback.id === id ? payload.feedback : feedback)
+      }) : prev);
+      setProjects(prev => prev.map(project => project.id === selectedProject.id
+        ? { ...project, feedbacks: project.feedbacks.map(feedback => feedback.id === id ? payload.feedback : feedback) }
+        : project));
+    } catch (error: any) {
+      showToast(error.message || 'Erreur de mise à jour du retour');
+    }
   };
 
-  const handleDeleteFeedback = (id: string) => {
+  const handleDeleteFeedback = async (id: string) => {
     if (!selectedProject) return;
-
-    setSelectedProject(prev => prev ? ({
-      ...prev,
-      feedbacks: prev.feedbacks.filter(f => f.id !== id)
-    }) : prev);
-    showToast('Retour supprimé');
+    try {
+      const response = await studioFetch(`/api/studio/projects/${encodeURIComponent(selectedProject.id)}/feedbacks/${encodeURIComponent(id)}`, {
+        method: 'DELETE'
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || 'Suppression du retour impossible.');
+      setSelectedProject(prev => prev ? ({
+        ...prev,
+        feedbacks: prev.feedbacks.filter(feedback => feedback.id !== id)
+      }) : prev);
+      setProjects(prev => prev.map(project => project.id === selectedProject.id
+        ? { ...project, feedbacks: project.feedbacks.filter(feedback => feedback.id !== id) }
+        : project));
+      showToast('Retour supprimé');
+    } catch (error: any) {
+      showToast(error.message || 'Erreur de suppression du retour');
+    }
   };
 
-  const handleSelectPlatform = (platform: 'instagram' | 'tiktok' | 'youtube_shorts') => {
+  const handleSelectPlatform = async (platform: 'instagram' | 'tiktok' | 'youtube_shorts') => {
     if (!selectedProject) return;
-    setSelectedProject({ ...selectedProject, platform });
-    showToast(`Plateforme sélectionnée : ${platform}`);
+    try {
+      const response = await studioFetch(`/api/studio/projects/${encodeURIComponent(selectedProject.id)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ platform })
+      });
+      if (!response.ok) throw new Error('Enregistrement de la plateforme impossible.');
+      setSelectedProject(prev => prev ? ({ ...prev, platform }) : prev);
+      setProjects(prev => prev.map(project => project.id === selectedProject.id ? { ...project, platform } : project));
+      showToast(`Plateforme sélectionnée : ${platform}`);
+    } catch (error: any) {
+      showToast(error.message || 'Erreur de mise à jour de la plateforme');
+    }
   };
 
   const handleCopyPrompt = async () => {
@@ -378,11 +474,42 @@ export default function App() {
     setTimeout(() => setCopiedPrompt(false), 2500);
   };
 
-  if (isLoading || !selectedProject) {
+  if (isLoading) {
     return (
       <div className="w-screen h-screen bg-[#09090b] flex flex-col items-center justify-center text-zinc-400 gap-3 font-mono">
         <div className="w-8 h-8 border-2 border-orange-500/20 border-t-orange-500 rounded-full animate-spin" />
-        <span className="text-xs">Chargement du Studio Melvynx...</span>
+        <span className="text-xs">Chargement de Video Agent Studio...</span>
+      </div>
+    );
+  }
+
+  if (!selectedProject) {
+    return (
+      <div className="w-screen min-h-screen bg-[#09090b] flex flex-col items-center justify-center text-zinc-200 p-6">
+        <div className="w-full max-w-xl text-center space-y-4">
+          <div className="mx-auto w-14 h-14 rounded-2xl border border-orange-500/30 bg-orange-500/10 flex items-center justify-center">
+            <Video className="w-7 h-7 text-orange-400" />
+          </div>
+          <h1 className="text-2xl font-bold text-white">Video Agent Studio</h1>
+          <p className="text-sm text-zinc-400">Aucun projet pour le moment. Crée ton premier Short pour commencer le montage et recevoir des retours horodatés.</p>
+          <button
+            onClick={() => setNewProjectModalOpen(true)}
+            className="px-5 py-3 rounded-xl bg-orange-500 hover:bg-orange-600 text-black font-bold text-sm"
+          >
+            Créer mon premier projet
+          </button>
+          <button
+            onClick={() => { setIsLoading(true); void loadProjects(); }}
+            className="block mx-auto text-xs text-zinc-500 hover:text-zinc-300"
+          >
+            Actualiser les projets
+          </button>
+        </div>
+        <NewProjectModal
+          isOpen={newProjectModalOpen}
+          onClose={() => setNewProjectModalOpen(false)}
+          onCreateProject={handleCreateProject}
+        />
       </div>
     );
   }
