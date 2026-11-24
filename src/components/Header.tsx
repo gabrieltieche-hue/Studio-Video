@@ -1,9 +1,9 @@
 import React from 'react';
-import { 
-  ChevronLeft, Copy, Check, MessageSquare, 
-  Folder, Sun, Moon, MoreHorizontal, Bot, 
-  Sidebar, PanelLeftClose, PanelLeftOpen, 
-  PanelRightClose, PanelRightOpen, Video, 
+import {
+  ChevronLeft, Copy, Check, MessageSquare,
+  Folder, Sun, Moon, MoreHorizontal, Bot,
+  Sidebar, PanelLeftClose, PanelLeftOpen,
+  PanelRightClose, PanelRightOpen, Video,
   Radio, Sparkles, Layers, SlidersHorizontal, Plus
 } from 'lucide-react';
 import { ShortProject } from '../types/studio';
@@ -18,8 +18,7 @@ interface HeaderProps {
   onCopyPrompt: () => void;
   copiedPrompt: boolean;
   openFeedbacksCount: number;
-  
-  // Panel Toggles
+
   showLeftPanel: boolean;
   onToggleLeftPanel: () => void;
   showTranscript: boolean;
@@ -51,7 +50,7 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   return (
     <header className="h-14 bg-[#101012] border-b border-zinc-800/80 px-2 sm:px-3.5 flex items-center justify-between select-none z-30 shrink-0">
-      
+
       {/* LEFT: Back Arrow + Project Slug + Metadata Subtitle (Matches Melvyn Screenshots) */}
       <div className="flex items-center gap-2 sm:gap-3 min-w-0">
         <button

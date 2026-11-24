@@ -15,8 +15,6 @@ const engine = await import('../src/server/ffmpegEngine.ts');
 storage.initStorage();
 
 const ffmpegAvailable = spawnSync('ffmpeg', ['-version'], { stdio: 'ignore' }).status === 0;
-// Playwright may be installed in the CI image, while local contributors can run
-// the storage and FFmpeg tests without downloading Chromium.
 const sourceWithAudio = path.join(storage.TAKES_DIR, 'integration-source.mp4');
 const sourceAllSilent = path.join(storage.TAKES_DIR, 'integration-silent.mp4');
 

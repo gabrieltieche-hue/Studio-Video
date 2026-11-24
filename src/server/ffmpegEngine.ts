@@ -37,7 +37,6 @@ export interface RenderJob {
   completedAt?: string;
 }
 
-// Probe media with FFprobe. Invalid files are errors, never synthetic metadata.
 export function probeVideo(filePath: string) {
   if (!fs.existsSync(filePath)) throw new Error(`Fichier média introuvable: ${path.basename(filePath)}`);
   const output = execFileSync('ffprobe', [
@@ -67,7 +66,6 @@ export function probeVideo(filePath: string) {
   };
 }
 
-// Extract a real thumbnail. Return false only when FFmpeg failed to create it.
 export function extractThumbnail(videoPath: string, outputPath: string, timeSec = 1.0): boolean {
   try {
     execFileSync('ffmpeg', ['-y', '-ss', String(Math.max(0, timeSec)), '-i', videoPath, '-frames:v', '1', '-q:v', '2', outputPath], {
@@ -80,7 +78,6 @@ export function extractThumbnail(videoPath: string, outputPath: string, timeSec 
   }
 }
 
-// Generate a 12-frame contact sheet from the supplied video.
 export function generateContactSheet(videoPath: string, outputPath: string, durationSec = 30.0): boolean {
   try {
     const interval = Math.max(0.2, durationSec / 12).toFixed(3);
@@ -95,7 +92,6 @@ export function generateContactSheet(videoPath: string, outputPath: string, dura
   }
 }
 
-// Scan takes/ directory and get real videos
 export function getAvailableTakes(): SourceVideo[] {
   if (!fs.existsSync(TAKES_DIR)) return [];
   const files = fs.readdirSync(TAKES_DIR);
@@ -129,7 +125,6 @@ export function getAvailableTakes(): SourceVideo[] {
   return videos;
 }
 
-// Save uploaded video after strict size, extension and media-container validation.
 export function saveUploadedVideo(filename: string, dataBase64OrBuffer: string | Buffer): SourceVideo {
   fs.mkdirSync(TAKES_DIR, { recursive: true });
   const cleanName = path.basename(filename).replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 160);
@@ -205,7 +200,6 @@ async function assertPublicHttpUrl(input: string): Promise<URL> {
   return url;
 }
 
-// Download an authorized public source with redirect, SSRF and size controls.
 export async function downloadRemoteVideo(inputUrl: string, filename?: string): Promise<SourceVideo> {
   fs.mkdirSync(TAKES_DIR, { recursive: true });
   const finalName = filename || `download-${Date.now()}.mp4`;
@@ -264,7 +258,6 @@ export async function downloadRemoteVideo(inputUrl: string, filename?: string): 
   }
 }
 
-// Job Storage
 export function saveJob(job: RenderJob) {
   if (!fs.existsSync(JOBS_DIR)) fs.mkdirSync(JOBS_DIR, { recursive: true });
   fs.writeFileSync(path.join(JOBS_DIR, `${job.id}.json`), JSON.stringify(job, null, 2), 'utf-8');
@@ -280,8 +273,6 @@ export function getJob(jobId: string): RenderJob | null {
   }
 }
 
-// -------------------------------------------------------------
-// Detect silences from the real audio stream with FFmpeg.
 export interface SilenceInterval {
   start: number;
   end: number;
@@ -337,8 +328,6 @@ export function detectAndRemoveSilences(videoPath: string): SilenceAnalysisResul
     silences.push({ start: openStart, end: duration, duration: duration - openStart });
   }
 
-  // A fully silent recording is not a 0.2-second clip. Preserve it and report
-  // zero cuts so the user can replace/repair the audio instead of losing the video.
   const isEntireTrackSilent = silences.length > 0 &&
     silences[0].start <= 0.05 &&
     silences[silences.length - 1].end >= duration - 0.05 &&
@@ -353,7 +342,6 @@ export function detectAndRemoveSilences(videoPath: string): SilenceAnalysisResul
     };
   }
 
-  // Keep a 90 ms guard band around detected silence to avoid clipping consonants.
   const speechSegments: Array<{ start: number; end: number }> = [];
   let cursor = 0;
   let removed = 0;
@@ -383,7 +371,6 @@ export function detectAndRemoveSilences(videoPath: string): SilenceAnalysisResul
   };
 }
 
-// Render the silence-trimmed result to a real MP4. The source remains untouched.
 export function prepareShortMedia(project: ShortProject, sourceVideoPath: string) {
   const analysis = detectAndRemoveSilences(sourceVideoPath);
   project.silenceAnalysis = {
@@ -432,7 +419,6 @@ export function prepareShortMedia(project: ShortProject, sourceVideoPath: string
   return { ...analysis, outputPath, outputName, outputDuration: result.duration, changed: true };
 }
 
-// Extract audio and run the configured whisper.cpp CLI. No transcript is fabricated.
 export async function extractAudioAndTranscribe(
   project: ShortProject,
   sourceVideoPath: string,
@@ -440,7 +426,6 @@ export async function extractAudioAndTranscribe(
 ): Promise<WhisperWord[]> {
   const source = probeVideo(sourceVideoPath);
   if (!source.hasAudio) throw new Error('La vidéo ne contient pas de piste audio : transcription impossible.');
-
 
   const projectDir = path.join(PROJECTS_DIR, project.id);
   fs.mkdirSync(projectDir, { recursive: true });
@@ -542,7 +527,6 @@ export async function extractAudioAndTranscribe(
   return words;
 }
 
-// Render every frame of a time-driven HTML component in a real headless Chromium page.
 export async function captureMotionComponentAsset(
   componentName: string,
   durationSec = 3.0,
@@ -625,9 +609,6 @@ export async function captureMotionComponentAsset(
   }
 }
 
-// COMPLETE TIMELINE COMPOSITION PIPELINE WITH FFMPEG
-// (Supports: clips, layout split, motion overlays, libass subtitles, SFX/audio mixing)
-// -------------------------------------------------------------
 export function startRenderShort(
   project: ShortProject,
   version: string,
@@ -729,8 +710,6 @@ export function startRenderShort(
     audioInputIndex = probeVideo(sourcePath).hasAudio ? 0 : null;
     nextInputIndex = 1;
   } else {
-    // Faceless mode renders original visuals on a clean canvas. When a source
-    // video is attached, only its audio is used as the voice-over track.
     if (sourcePath && probeVideo(sourcePath).hasAudio) {
       args.push('-i', sourcePath);
       audioInputIndex = 0;
@@ -748,7 +727,6 @@ export function startRenderShort(
     baseLabel = 'base0';
   }
 
-  // Motion components are actual captured clips. Loop each one and composite it only in its timeline range.
   let currentLabel = baseLabel;
   overlays.forEach((overlay, index) => {
     const inputIndex = nextInputIndex++;
@@ -767,7 +745,6 @@ export function startRenderShort(
     graph.push(`[${currentLabel}]${subtitleFilter}[vout]`);
   }
 
-  // Build the final audio bus from source voice, optional music and timed SFX.
   const audioLabels: string[] = [];
   if (audioInputIndex !== null) {
     graph.push(`[${audioInputIndex}:a:0]atrim=duration=${duration.toFixed(3)},asetpts=PTS-STARTPTS[voice]`);

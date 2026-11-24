@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { 
-  Video, FileText, MessageSquare, Folder, Plus, Sparkles 
+import {
+  Video, FileText, MessageSquare, Folder, Plus, Sparkles
 } from 'lucide-react';
 import { Header } from './components/Header';
 import { LeftSidebar } from './components/LeftSidebar';
@@ -16,8 +16,6 @@ import { NewProjectModal } from './components/NewProjectModal';
 import { CopyPromptModal } from './components/CopyPromptModal';
 import { ShortProject, SourceVideo, FeedbackItem } from './types/studio';
 
-// In production, the API key is entered once per browser tab. The server exchanges
-// the bearer header for an HttpOnly same-origin cookie used by the native video player.
 async function studioFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
   const send = (token: string | null) => {
     const headers = new Headers(init.headers || {});
@@ -46,30 +44,25 @@ export default function App() {
   const [sourceVideos, setSourceVideos] = useState<SourceVideo[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Panel Visibility Toggles (To satisfy user's request: "on doit pouvoir cacher ou diminuer les fenetres")
   const [showLeftPanel, setShowLeftPanel] = useState(true);
   const [showTranscript, setShowTranscript] = useState(true);
   const [showTimeline, setShowTimeline] = useState(true);
   const [showRightPanel, setShowRightPanel] = useState(true);
 
-  // Playback state
   const [currentTime, setCurrentTime] = useState(7.43);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
   const animFrameRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number>(Date.now());
 
-  // Responsive Mobile Tab navigation
   const [mobileTab, setMobileTab] = useState<'player' | 'transcript' | 'feedback' | 'projects'>('player');
 
-  // UI Modals
   const [chatGptModalOpen, setChatGptModalOpen] = useState(false);
   const [newProjectModalOpen, setNewProjectModalOpen] = useState(false);
   const [copyPromptModalOpen, setCopyPromptModalOpen] = useState(false);
   const [contactSheetOpen, setContactSheetOpen] = useState(false);
   const [motionEditorOpen, setMotionEditorOpen] = useState(false);
 
-  // Status & Notifications
   const [copiedPrompt, setCopiedPrompt] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
@@ -78,7 +71,6 @@ export default function App() {
     setTimeout(() => setToastMessage(null), 3000);
   };
 
-  // Real Project Creation Handler
   const handleCreateProject = async (data: {
     title: string;
     slug: string;
@@ -158,7 +150,6 @@ export default function App() {
     }
   };
 
-  // Delete Project Handler
   const handleDeleteProject = async (id: string) => {
     try {
       const response = await studioFetch(`/api/studio/projects/${encodeURIComponent(id)}`, { method: 'DELETE' });
@@ -179,7 +170,6 @@ export default function App() {
     }
   };
 
-  // Video File Import Handler
   const handleImportVideoFile = async (file: File) => {
     try {
       const allowed = ['video/mp4', 'video/quicktime', 'video/webm', 'application/octet-stream'];
@@ -237,7 +227,6 @@ export default function App() {
     }
   };
 
-  // Fetch initial project data from server
   const loadProjects = async () => {
     try {
       const res = await studioFetch('/api/studio/projects');
@@ -268,7 +257,6 @@ export default function App() {
     loadProjects();
   }, []);
 
-  // Keyboard Shortcuts: Spacebar for play/pause, Arrow keys, C for comment
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement)?.tagName)) {
@@ -299,7 +287,6 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [selectedProject]);
 
-  // Main High-Precision Playback Loop
   useEffect(() => {
     if (!isPlaying || !selectedProject) {
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
@@ -332,7 +319,6 @@ export default function App() {
     };
   }, [isPlaying, playbackSpeed, selectedProject]);
 
-  // Actions
   const handleSeek = (time: number) => {
     if (selectedProject) {
       setCurrentTime(Math.max(0, Math.min(selectedProject.duration, time)));
@@ -519,7 +505,7 @@ export default function App() {
 
   return (
     <div className="w-screen h-screen bg-[#0c0c0e] text-zinc-200 flex flex-col overflow-hidden font-sans">
-      
+
       {/* 1. TOP HEADER (Studio vs Recorder + Toggles + New Project + Copy Prompt) */}
       <Header
         project={selectedProject}
@@ -548,7 +534,6 @@ export default function App() {
           onOpenChatGPT={() => setChatGptModalOpen(true)}
         />
       ) : (
-        /* STUDIO VIEW */
         <>
           {/* DESKTOP LAYOUT (>= 1024px): Full Multi-Column Studio identical to Melvyn Screenshots */}
           <div className="hidden lg:flex flex-1 overflow-hidden">

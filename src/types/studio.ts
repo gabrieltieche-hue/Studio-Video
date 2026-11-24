@@ -101,7 +101,7 @@ export interface ShortProject {
   mode: 'faceless_explainer' | 'split_screen_clips';
   platform: 'instagram' | 'tiktok' | 'youtube_shorts';
   status: 'draft' | 'preparing' | 'rendering' | 'ready';
-  duration: number; // in seconds
+  duration: number;
   fps: number;
   resolution: { width: number; height: number };
   sourceVideoName?: string;

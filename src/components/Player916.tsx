@@ -1,6 +1,6 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { 
-  Pencil, MousePointer, Undo2, Trash2, Check, 
+import {
+  Pencil, MousePointer, Undo2, Trash2, Check,
   Sparkles, CheckCircle2, TrendingUp, BarChart3,
   Rocket, ArrowUpRight, Award, Plus, Layers
 } from 'lucide-react';
@@ -21,10 +21,8 @@ export const Player916: React.FC<Player916Props> = ({
   onPause,
   onAddFeedbackWithSnapshot,
 }) => {
-  // Tool Modes: Normal, Draw, Inspect
   const [activeTool, setActiveTool] = useState<'normal' | 'draw' | 'inspect'>('normal');
-  
-  // Drawing states
+
   const [drawColor, setDrawColor] = useState('#FF6B00');
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -33,7 +31,6 @@ export const Player916: React.FC<Player916Props> = ({
   const [hasDrawnSomething, setHasDrawnSomething] = useState(false);
   const [drawHistory, setDrawHistory] = useState<ImageData[]>([]);
 
-  // Inspect mode states
   const [hoveredElement, setHoveredElement] = useState<{
     id: string;
     name: string;
@@ -45,9 +42,8 @@ export const Player916: React.FC<Player916Props> = ({
     instruction: string;
   } | null>(null);
 
-  // Sync real video tag if present
-  const isVideoSource = project.speakerVideoUrl?.includes('.mp4') || 
-                        project.speakerVideoUrl?.includes('.webm') || 
+  const isVideoSource = project.speakerVideoUrl?.includes('.mp4') ||
+                        project.speakerVideoUrl?.includes('.webm') ||
                         project.speakerVideoUrl?.startsWith('blob:');
 
   useEffect(() => {
@@ -63,20 +59,16 @@ export const Player916: React.FC<Player916Props> = ({
     }
   }, [currentTime, isPlaying, isVideoSource]);
 
-  // Active elements in motion track
   const activeMotion = project.motionTrack.find(
     m => currentTime >= m.start && currentTime <= m.end
   );
 
-  // ROCK-SOLID SUBTITLE SYNCHRONIZATION ALGORITHM:
-  // 1. Find the current or most recent spoken word without resetting to 0 during silence gaps
   const transcript = project.transcript || [];
   let currentWordIdx = transcript.findIndex(
     w => currentTime >= w.start && currentTime <= w.end
   );
 
   if (currentWordIdx === -1) {
-    // If between words, find the last word that has started
     for (let i = transcript.length - 1; i >= 0; i--) {
       if (transcript[i].start <= currentTime) {
         currentWordIdx = i;
@@ -85,18 +77,15 @@ export const Player916: React.FC<Player916Props> = ({
     }
   }
 
-  // Safe fallback if before the first word
   if (currentWordIdx === -1 && transcript.length > 0) {
     currentWordIdx = 0;
   }
 
   const activeWord = transcript[currentWordIdx];
 
-  // 2. Generate a 3 to 4 word window burst that stays stable and highlights the active word
   const burstStart = Math.floor(currentWordIdx / 3) * 3;
   const subtitleWords = transcript.slice(burstStart, burstStart + 3);
 
-  // Drawing Canvas logic
   useEffect(() => {
     if (activeTool === 'draw' && canvasRef.current && containerRef.current) {
       const canvas = canvasRef.current;
@@ -179,7 +168,6 @@ export const Player916: React.FC<Player916Props> = ({
     setActiveTool('normal');
   };
 
-  // Inspect mode element hover calculation
   const handleInspectMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
     if (activeTool !== 'inspect') return;
     const container = e.currentTarget.getBoundingClientRect();
@@ -218,9 +206,9 @@ export const Player916: React.FC<Player916Props> = ({
 
   return (
     <div className="w-full h-full flex flex-col items-center justify-center relative select-none">
-      
+
       {/* 9:16 VERTICAL VIDEO PLAYER CONTAINER (Scales smoothly to fit available height) */}
-      <div 
+      <div
         ref={containerRef}
         onMouseMove={handleInspectMouseMove}
         onClick={handleInspectClick}
@@ -239,7 +227,7 @@ export const Player916: React.FC<Player916Props> = ({
           <>
             {/* TOP HALF: 58% Animated Infographics, Cards, Badges */}
             <div className="h-[58%] w-full bg-[#131316] p-2.5 flex flex-col justify-between relative overflow-hidden border-b border-zinc-800/80">
-              
+
               {/* Top Claude Badge */}
               <div className="flex items-center justify-center z-10 pt-0.5">
                 <div className="flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-white text-black shadow-md text-[10px] font-bold tracking-tight">
@@ -251,7 +239,6 @@ export const Player916: React.FC<Player916Props> = ({
               {/* Dynamic Animated Motion Content */}
               <div className="flex-1 flex flex-col items-center justify-center z-10 py-1">
                 {currentTime < 18 ? (
-                  /* Scene A: 3 Floating Phone Cards with follower stats */
                   <div className="relative w-full flex items-center justify-center gap-1.5 py-1">
                     <div className="w-18 bg-zinc-900 border border-zinc-700/80 rounded-xl p-1.5 shadow-xl rotate-[-8deg] flex flex-col justify-between h-24">
                       <div className="flex items-center gap-1">
@@ -287,7 +274,6 @@ export const Player916: React.FC<Player916Props> = ({
                     </div>
                   </div>
                 ) : (
-                  /* Scene B: Checklist Box (✓ prompts, ✓ étapes, ✓ outils) */
                   <div className="w-full max-w-[190px] bg-zinc-900/95 border border-zinc-700 rounded-xl p-2 shadow-xl space-y-1">
                     <div className="flex items-center gap-1.5 p-1 rounded-md bg-zinc-800 text-white text-[10px] font-bold">
                       <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
@@ -351,7 +337,7 @@ export const Player916: React.FC<Player916Props> = ({
               )}
 
               <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-black/20 pointer-events-none" />
-              
+
               <div className="absolute bottom-1.5 left-2 z-10 flex items-center gap-1 px-1.5 py-0.5 rounded bg-black/60 backdrop-blur-sm text-[8px] text-zinc-300 font-mono">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
                 <span>Intervenant 42%</span>
@@ -359,9 +345,6 @@ export const Player916: React.FC<Player916Props> = ({
             </div>
           </>
         ) : (
-          /* ============================================================== */
-          /* MODE A: FACELESS EXPLAINER */
-          /* ============================================================== */
           <div className="h-full w-full bg-[#090d16] p-4 flex flex-col justify-between relative overflow-hidden">
             <div className="flex items-center justify-between z-10">
               <span className="px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 font-mono text-[9px] font-bold border border-cyan-500/30">

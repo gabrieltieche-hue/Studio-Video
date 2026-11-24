@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { 
-  Video, Mic, Settings, Play, Pause, RotateCcw, 
+import {
+  Video, Mic, Settings, Play, Pause, RotateCcw,
   Trash2, ChevronLeft, ChevronRight, Volume2, Sparkles,
-  Maximize2, Minimize2, CheckCircle2, AlertCircle, 
+  Maximize2, Minimize2, CheckCircle2, AlertCircle,
   HelpCircle, Sliders, Radio, Camera, Film, Plus
 } from 'lucide-react';
 import { ScriptItem } from '../types/studio';
@@ -74,13 +74,11 @@ export const RecorderView: React.FC<RecorderViewProps> = ({
   const [showSettings, setShowSettings] = useState(true);
   const [cameraPiPSize, setCameraPiPSize] = useState<'normal' | 'expanded'>('normal');
 
-  // Device selections
   const [selectedCamera, setSelectedCamera] = useState('OsmoPocket4 (2ca3:0023)');
   const [selectedMic, setSelectedMic] = useState('Default - Shure MV7+ (14ed:1019)');
   const [flashCountdown, setFlashCountdown] = useState(false);
   const [voiceFollow, setVoiceFollow] = useState(true);
 
-  // Recording timer loop
   useEffect(() => {
     let timer: any;
     if (isRecording) {
@@ -91,7 +89,6 @@ export const RecorderView: React.FC<RecorderViewProps> = ({
     return () => clearInterval(timer);
   }, [isRecording]);
 
-  // Keyboard shortcut: R to start/stop record, Esc to discard, Arrow up/down to navigate lines
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
       if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) return;
@@ -124,7 +121,7 @@ export const RecorderView: React.FC<RecorderViewProps> = ({
 
   return (
     <div className="w-full h-full bg-[#0c0c0e] text-zinc-200 flex flex-col overflow-hidden font-sans select-none">
-      
+
       {/* 1. TOP HEADER (Matching Melvyn's Recorder Header) */}
       <header className="h-14 bg-[#121214] border-b border-zinc-800/80 px-4 flex items-center justify-between z-20">
         <div className="flex items-center gap-3">
@@ -158,8 +155,8 @@ export const RecorderView: React.FC<RecorderViewProps> = ({
           <button
             onClick={() => setShowSettings(!showSettings)}
             className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition ${
-              showSettings 
-                ? 'bg-zinc-800 border-zinc-600 text-white' 
+              showSettings
+                ? 'bg-zinc-800 border-zinc-600 text-white'
                 : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white'
             }`}
           >
@@ -179,7 +176,7 @@ export const RecorderView: React.FC<RecorderViewProps> = ({
 
       {/* 2. MAIN 3-ZONE RECORDER WORKSPACE */}
       <div className="flex-1 flex overflow-hidden">
-        
+
         {/* LEFT COLUMN: SCRIPTS BROWSER */}
         <aside className="w-72 bg-[#141416] border-r border-zinc-800/80 flex flex-col h-full text-xs">
           {/* Header */}
@@ -280,7 +277,7 @@ export const RecorderView: React.FC<RecorderViewProps> = ({
 
         {/* CENTER: TELEPROMPTER SCREEN & CAMERA PiP */}
         <main className="flex-1 flex flex-col bg-[#09090b] relative overflow-hidden">
-          
+
           {/* Teleprompter Scrolling Text Area */}
           <div className="flex-1 overflow-y-auto px-10 py-12 flex flex-col items-center justify-center custom-scrollbar">
             <div className="max-w-2xl w-full space-y-6">
@@ -318,7 +315,7 @@ export const RecorderView: React.FC<RecorderViewProps> = ({
           </div>
 
           {/* Floating Camera PiP (Preview like in Melvyn's Screenshots 6 & 7) */}
-          <div 
+          <div
             className={`absolute bottom-20 right-8 bg-zinc-950 border-2 border-red-500/50 rounded-2xl overflow-hidden shadow-2xl z-30 transition-all duration-200 ${
               cameraPiPSize === 'expanded' ? 'w-80 h-52' : 'w-64 h-40'
             }`}
