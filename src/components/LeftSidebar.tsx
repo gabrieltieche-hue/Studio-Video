@@ -1,7 +1,7 @@
 import React, { useState, useRef } from 'react';
-import { 
-  Instagram, Youtube, Sparkles, Folder, Search, 
-  ChevronRight, ChevronDown, Check, Info, Scissors, 
+import {
+  Instagram, Youtube, Sparkles, Folder, Search,
+  ChevronRight, ChevronDown, Check, Info, Scissors,
   Clock, Play, Film, MessageSquarePlus, ChevronLeft,
   Plus, Trash2, Upload, Video
 } from 'lucide-react';
@@ -62,22 +62,21 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
     }
   };
 
-  // Find active word in transcript
   const activeWordIndex = project.transcript.findIndex(
     w => currentTime >= w.start && currentTime <= w.end
   );
 
   return (
     <div className="flex h-full select-none text-zinc-300">
-      
+
       {/* ============================================================== */}
       {/* COLUMN 1: PROJECTS, PLATFORMS, RENDERS & VIDEOS BROWSER */}
       {/* ============================================================== */}
       {showLeftPanel && (
         <aside className="w-56 bg-[#121214] border-r border-zinc-800/80 flex flex-col h-full text-xs overflow-hidden shrink-0">
-          
+
           <div className="flex-1 overflow-y-auto p-2.5 space-y-4 custom-scrollbar">
-            
+
             {/* 1. Real Projects Section (User can create, switch, and delete projects) */}
             <div>
               <div className="flex items-center justify-between text-[11px] font-semibold text-zinc-400 mb-1.5 px-1">

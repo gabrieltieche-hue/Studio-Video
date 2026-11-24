@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { 
-  Code2, Play, Pause, RotateCcw, Video, Save, 
+import {
+  Code2, Play, Pause, RotateCcw, Video, Save,
   Sparkles, Check, Rocket, TrendingUp, Cpu, Copy
 } from 'lucide-react';
 import { MotionComponent } from '../types/studio';
@@ -24,14 +24,12 @@ export const MotionEditorModal: React.FC<MotionEditorModalProps> = ({
   const [compName, setCompName] = useState('Fusée en Décollage');
   const [compCode, setCompCode] = useState('');
   const [compDesc, setCompDesc] = useState('');
-  
-  // T-slider state
+
   const [tValue, setTValue] = useState(0.5);
   const [isPlayingT, setIsPlayingT] = useState(false);
   const [isCapturing, setIsCapturing] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
 
-  // Sync when selected component changes
   useEffect(() => {
     const comp = motionComponents[selectedCompId];
     if (comp) {
@@ -41,14 +39,13 @@ export const MotionEditorModal: React.FC<MotionEditorModalProps> = ({
     }
   }, [selectedCompId, motionComponents]);
 
-  // Animation RAF loop for setT
   useEffect(() => {
     let animId: number;
     let startT = Date.now();
 
     if (isPlayingT) {
       const loop = () => {
-        const elapsed = (Date.now() - startT) / 2000; // 2 seconds cycle
+        const elapsed = (Date.now() - startT) / 2000;
         const currentT = elapsed % 1;
         setTValue(currentT);
         animId = requestAnimationFrame(loop);
@@ -76,7 +73,7 @@ export const MotionEditorModal: React.FC<MotionEditorModalProps> = ({
   return (
     <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
       <div className="bg-[#161619] border border-zinc-700/80 rounded-2xl w-full max-w-5xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden text-zinc-300">
-        
+
         {/* Header */}
         <div className="p-4 border-b border-zinc-800 bg-zinc-900/80 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -108,7 +105,7 @@ export const MotionEditorModal: React.FC<MotionEditorModalProps> = ({
 
         {/* Content Body */}
         <div className="flex-1 overflow-hidden flex flex-col md:flex-row">
-          
+
           {/* Left: Components List & Code Editor */}
           <div className="flex-1 flex flex-col border-r border-zinc-800 p-4 space-y-4 overflow-y-auto custom-scrollbar">
             {/* Component Selector */}
@@ -189,7 +186,7 @@ export const MotionEditorModal: React.FC<MotionEditorModalProps> = ({
               {/* Preview Canvas Area */}
               <div className="w-full aspect-[9/16] max-h-[380px] bg-black rounded-2xl border-2 border-zinc-800 overflow-hidden relative flex flex-col items-center justify-center p-4">
                 {/* Background Alpha Checkerboard */}
-                <div 
+                <div
                   className="absolute inset-0 opacity-10 pointer-events-none"
                   style={{
                     backgroundImage: 'linear-gradient(45deg, #444 25%, transparent 25%), linear-gradient(-45deg, #444 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #444 75%), linear-gradient(-45deg, transparent 75%, #444 75%)',
@@ -200,7 +197,7 @@ export const MotionEditorModal: React.FC<MotionEditorModalProps> = ({
 
                 {/* Render Rocket */}
                 {selectedCompId === 'comp-rocket' && (
-                  <div 
+                  <div
                     className="relative transition-transform duration-75"
                     style={{
                       transform: `translate3d(${Math.sin(tValue * 40) * 4}px, ${(1 - tValue) * 80 - 40}px, 0)`
@@ -210,7 +207,7 @@ export const MotionEditorModal: React.FC<MotionEditorModalProps> = ({
                       <Rocket className="w-10 h-10 text-white -rotate-45" />
                     </div>
                     {/* Flame */}
-                    <div 
+                    <div
                       className="w-8 h-12 bg-gradient-to-t from-red-600 via-orange-400 to-yellow-300 rounded-full mx-auto -mt-2 blur-[2px] transition-transform"
                       style={{
                         transform: `scaleY(${0.8 + Math.sin(tValue * 30) * 0.4})`
@@ -229,8 +226,8 @@ export const MotionEditorModal: React.FC<MotionEditorModalProps> = ({
                       {[35, 52, 70, 95, 140, 210].map((h, i) => {
                         const progress = Math.min(1, Math.max(0, (tValue * 1.5) - (i * 0.15)));
                         return (
-                          <div 
-                            key={i} 
+                          <div
+                            key={i}
                             className="flex-1 bg-gradient-to-t from-cyan-600 to-blue-400 rounded-t transition-all duration-75"
                             style={{ height: `${progress * h * 0.45}px` }}
                           />
@@ -244,11 +241,11 @@ export const MotionEditorModal: React.FC<MotionEditorModalProps> = ({
                 {selectedCompId === 'comp-neural' && (
                   <div className="relative w-44 h-44 flex items-center justify-center">
                     <Cpu className="w-14 h-14 text-cyan-400 z-10 animate-pulse" />
-                    <div 
+                    <div
                       className="absolute inset-0 border-2 border-cyan-500/40 rounded-full animate-spin"
                       style={{ animationDuration: '6s' }}
                     />
-                    <div 
+                    <div
                       className="absolute inset-4 border border-dashed border-orange-500/50 rounded-full animate-spin"
                       style={{ animationDirection: 'reverse', animationDuration: '4s' }}
                     />

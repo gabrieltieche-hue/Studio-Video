@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
-import { 
-  Bot, Copy, Check, Terminal, ExternalLink, 
-  Sparkles, CheckCircle2, Play, AlertCircle, 
+import {
+  Bot, Copy, Check, Terminal, ExternalLink,
+  Sparkles, CheckCircle2, Play, AlertCircle,
   HelpCircle, Code2, Server, Cpu, ShieldCheck
 } from 'lucide-react';
 
@@ -23,7 +23,6 @@ export const ChatGPTModal: React.FC<ChatGPTModalProps> = ({
   const [copiedRawJson, setCopiedRawJson] = useState(false);
   const [copiedReplyToGpt, setCopiedReplyToGpt] = useState(false);
 
-  // Tool runner state
   const [selectedTool, setSelectedTool] = useState('studio_status');
   const [toolArgsJson, setToolArgsJson] = useState('{}');
   const [isExecutingTool, setIsExecutingTool] = useState(false);
@@ -51,12 +50,10 @@ export const ChatGPTModal: React.FC<ChatGPTModalProps> = ({
       setCopiedRawJson(true);
       setTimeout(() => setCopiedRawJson(false), 2500);
     } catch (e) {
-      // Fallback
       copyToClipboard(openApiUrl, setCopiedRawJson);
     }
   };
 
-  // Pre-configured tool examples for interactive test
   const toolPresets: Record<string, string> = {
     studio_status: '{}',
     list_source_videos: '{}',
@@ -134,7 +131,7 @@ Règles de travail :
   return (
     <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
       <div className="bg-[#161619] border border-zinc-700/80 rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden text-zinc-300">
-        
+
         {/* Header */}
         <div className="p-4 border-b border-zinc-800 bg-zinc-900/80 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -218,7 +215,7 @@ Règles de travail :
 
         {/* Tab Content */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar">
-          
+
           {/* ============================================================== */}
           {/* TAB 1: CHATGPT CUSTOM GPT ACTIONS (The easiest & most powerful) */}
           {/* ============================================================== */}
